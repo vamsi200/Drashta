@@ -1,3 +1,6 @@
+use drashta::parser;
+
 fn main() {
-    println!("Hello, world!");
+    let s = parser::print();
+    println!("{s}")
 }
