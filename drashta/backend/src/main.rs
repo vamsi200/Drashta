@@ -12,8 +12,6 @@ pub async fn main() -> Result<()> {
     let (tx, _) = tokio::sync::broadcast::channel::<Entry>(1);
 
     // tokio::spawn(receive_data(tx.clone())).await?;
-    let tx_clone = tx.clone();
-    let journal_units = vec!["sshd.service"];
     let _ = render_app(tx).await;
 
     // read_journal_logs(tx.clone(), Some("NetworkManager.service"))
