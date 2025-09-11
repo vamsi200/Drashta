@@ -2,7 +2,9 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use crate::parser::{Entry, flush_previous_data, flush_upto_n_entries, read_journal_logs};
+use crate::parser::{
+    Entry, SshdEvent, flush_previous_data, flush_upto_n_entries, read_journal_logs,
+};
 use anyhow::Result;
 use axum::extract::{Query, State};
 use axum::{
@@ -13,6 +15,7 @@ use axum::{
 use futures::StreamExt;
 use futures::{Stream, stream};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::io::Write;
@@ -25,7 +28,6 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::{spawn_blocking, yield_now};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
-
 pub struct Journalunits {
     journal_units: Vec<&'static str>,
 }
@@ -93,7 +95,7 @@ pub async fn drain_data_upto_n(
 }
 
 pub async fn drain_backlog(
-    State(tx): State<tokio::sync::broadcast::Sender<Entry>>,
+    State(tx): State<tokio::sync::broadcast::Sender<SshdEvent<'static>>>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let rx = tx.clone().subscribe();
     let journal_units = Journalunits::new();

@@ -54,8 +54,9 @@ pub enum SshdEvent<'a> {
     ConnectionClosed {
         timestamp: Cow<'a, str>,
         ip: Cow<'a, str>,
+        port: Cow<'a, str>,
         user: Cow<'a, str>,
-        reason: Cow<'a, str>,
+        msg: Cow<'a, str>,
     },
 
     ProtocolMismatch {
@@ -75,9 +76,9 @@ pub enum SshdEvent<'a> {
     },
 }
 
-pub fn parse_sshd_logs(map: Entry) {
+pub fn parse_sshd_logs(map: Entry) -> Option<SshdEvent<'static>> {
     static AUTH_SUCCESS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^Accepted (\w+) for (\w+) from ([\d.]+) port (\d+) ssh2$").unwrap()
+        Regex::new(r"^Accepted (\w+) for (\w+) from ([0-9a-fA-F:.]+) port (\d+) ssh2$").unwrap()
     });
 
     static AUTH_FAILURE: Lazy<Regex> = Lazy::new(|| {
@@ -87,45 +88,99 @@ pub fn parse_sshd_logs(map: Entry) {
         .unwrap()
     });
 
+    static SESSION_OPENED: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"^pam_unix\(sshd:session\): session opened(?: for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\))?$",
+        )
+        .unwrap()
+    });
+
+    static SESSION_CLOSED: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^pam_unix\(sshd:session\): session closed(?: for user (\w+))?").unwrap()
+    });
+
+    static CONNECTION_CLOSED: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^Connection closed by authenticating user (\w+) ([0-9a-fA-F:.]+) port (\d+) \[(\w+)\]")
+            .unwrap()
+    });
+
     if let Some(s) = map.get("MESSAGE") {
         let test = String::new();
-        let timestamp = map.get("SYSLOG_TIMESTAMP").unwrap_or(&test);
 
         if let Some(msg) = AUTH_SUCCESS.captures(s) {
-            let method = msg.get(1).unwrap().as_str();
-            let user = msg.get(2).unwrap().as_str();
-            let ip = msg.get(3).unwrap().as_str();
-            let port = msg.get(4).unwrap().as_str();
+            let timestamp = map.get("SYSLOG_TIMESTAMP").unwrap().clone();
+            let method = msg.get(1).unwrap().as_str().to_string();
+            let user = msg.get(2).unwrap().as_str().to_string();
+            let ip = msg.get(3).unwrap().as_str().to_string();
+            let port = msg.get(4).unwrap().as_str().to_string();
 
-            let out = SshdEvent::AuthSuccess {
-                timestamp: Cow::Borrowed(timestamp),
-                user: Cow::Borrowed(user),
-                ip: Cow::Borrowed(ip),
-                port: Cow::Borrowed(port),
-                method: Cow::Borrowed(method),
-            };
-            println!("{:?}", out);
+            return Some(SshdEvent::AuthSuccess {
+                timestamp: Cow::Owned(timestamp),
+                user: Cow::Owned(user),
+                ip: Cow::Owned(ip),
+                port: Cow::Owned(port),
+                method: Cow::Owned(method),
+            });
+        }
+        if let Some(msg) = AUTH_FAILURE.captures(s) {
+            let timestamp = map.get("SYSLOG_TIMESTAMP").unwrap().clone();
+            let method = msg.get(1).unwrap().as_str().to_string();
+            let user = msg.get(2).unwrap().as_str().to_string();
+            let ip = msg.get(3).unwrap().as_str().to_string();
+            let port = msg.get(4).unwrap().as_str().to_string();
+
+            return Some(SshdEvent::AuthSuccess {
+                timestamp: Cow::Owned(timestamp),
+                user: Cow::Owned(user),
+                ip: Cow::Owned(ip),
+                port: Cow::Owned(port),
+                method: Cow::Owned(method),
+            });
         }
 
-        if let Some(msg) = AUTH_FAILURE.captures(s) {
-            let method = msg.get(1).unwrap().as_str();
-            let user = msg.get(2).unwrap().as_str();
-            let ip = msg.get(3).unwrap().as_str();
-            let port = msg.get(4).unwrap().as_str();
+        if let Some(msg) = SESSION_OPENED.captures(s) {
+            let timestamp = map.get("SYSLOG_TIMESTAMP").unwrap().clone();
+            let user = msg.get(1).unwrap().as_str().to_string();
+            let uid = msg.get(2).unwrap().as_str().to_string();
 
-            let out = SshdEvent::AuthSuccess {
-                timestamp: Cow::Borrowed(timestamp),
-                user: Cow::Borrowed(user),
-                ip: Cow::Borrowed(ip),
-                port: Cow::Borrowed(port),
-                method: Cow::Borrowed(method),
-            };
-            println!("{:?}", out);
+            return Some(SshdEvent::SessionOpened {
+                timestamp: Cow::Owned(timestamp.clone().to_owned()),
+                user: Cow::Owned(user),
+                uid: Cow::Owned(uid),
+            });
+        }
+
+        if let Some(msg) = SESSION_CLOSED.captures(s) {
+            let timestamp = map.get("SYSLOG_TIMESTAMP").unwrap().clone();
+            let user = msg.get(1).unwrap().as_str().to_string();
+
+            return Some(SshdEvent::SessionClosed {
+                timestamp: Cow::Owned(timestamp.clone().to_owned()),
+                user: Cow::Owned(user),
+            });
+        }
+
+        if let Some(msg) = CONNECTION_CLOSED.captures(s) {
+            let timestamp = map.get("SYSLOG_TIMESTAMP").unwrap().clone();
+            let user = msg.get(1).unwrap().as_str().to_string();
+            let ip = msg.get(2).unwrap().as_str().to_string();
+            let port = msg.get(3).unwrap().as_str().to_string();
+            let msg = msg.get(4).unwrap().as_str().to_string();
+
+            return Some(SshdEvent::ConnectionClosed {
+                timestamp: Cow::Owned(timestamp.clone().to_owned()),
+                ip: Cow::Owned(ip),
+                port: Cow::Owned(port),
+                user: Cow::Owned(user),
+                msg: Cow::Owned(msg),
+            });
         }
     }
+    None
 }
-pub fn flush_previous_data(
-    tx: tokio::sync::broadcast::Sender<Entry>,
+
+pub fn flush_previous_data<'a>(
+    tx: tokio::sync::broadcast::Sender<SshdEvent>,
     unit: Vec<&str>,
 ) -> Result<()> {
     let mut s: Journal = journal::OpenOptions::default()
@@ -144,7 +199,13 @@ pub fn flush_previous_data(
         //     println!("Dropped event: {:?}", e);
         // }
         //
-        parse_sshd_logs(data);
+
+        let data_clone = data.clone();
+        if let Some(s) = parse_sshd_logs(data) {
+            if let Err(e) = tx.send(s) {
+                println!("Dropped");
+            }
+        }
     }
 
     Ok(())
