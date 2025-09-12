@@ -11,13 +11,13 @@ use drashta::render::render_app;
 use std::borrow::Cow;
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    let (tx, _) = tokio::sync::broadcast::channel::<SshdEvent<'static>>(1);
+    let (tx, _) = tokio::sync::broadcast::channel::<SshdEvent>(1);
 
     // tokio::spawn(receive_data(tx.clone())).await?;
-    let _ = render_app(tx).await;
+    // let _ = render_app(tx).await;
     let unit = vec!["sshd.service"];
 
-    // let _ = flush_previous_data(tx, unit);
+    let _ = flush_previous_data(tx, unit);
 
     // read_journal_logs(tx.clone(), Some("NetworkManager.service"))
     //     .await

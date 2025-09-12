@@ -5,7 +5,7 @@ use axum::{Router, routing::get};
 //     todo!()
 // }
 
-pub async fn render_app<'a>(tx: tokio::sync::broadcast::Sender<SshdEvent<'static>>) {
+pub async fn render_app<'a>(tx: tokio::sync::broadcast::Sender<SshdEvent>) {
     let addr = "0.0.0.0:3200";
     println!("Started Listening at - {}", addr);
 

@@ -13,6 +13,7 @@ use axum::{
     routing::get,
 };
 use futures::StreamExt;
+use futures::channel::mpsc::TryRecvError;
 use futures::{Stream, stream};
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -42,23 +43,23 @@ impl Journalunits {
         // just for testing
         vec![
             "sshd.service",
-            "systemd-journald.service",
-            "systemd-logind.service",
-            "cron.service",
-            "rsyslog.service",
-            "NetworkManager.service",
-            "dhcpcd.service",
-            "nginx.service",
-            "apache2.service",
-            "docker.service",
-            "firewalld.service",
-            "polkit.service",
-            "udisks2.service",
-            "bluetooth.service",
-            "systemd-udevd.service",
-            "postgresql.service",
-            "mysql.service",
-            "cups.service",
+            // "systemd-journald.service",
+            // "systemd-logind.service",
+            // "cron.service",
+            // "rsyslog.service",
+            // "NetworkManager.service",
+            // "dhcpcd.service",
+            // "nginx.service",
+            // "apache2.service",
+            // "docker.service",
+            // "firewalld.service",
+            // "polkit.service",
+            // "udisks2.service",
+            // "bluetooth.service",
+            // "systemd-udevd.service",
+            // "postgresql.service",
+            // "mysql.service",
+            // "cups.service",
         ]
     }
 }
@@ -95,12 +96,14 @@ pub async fn drain_data_upto_n(
 }
 
 pub async fn drain_backlog(
-    State(tx): State<tokio::sync::broadcast::Sender<SshdEvent<'static>>>,
+    State(tx): State<tokio::sync::broadcast::Sender<SshdEvent>>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let rx = tx.clone().subscribe();
+
     let journal_units = Journalunits::new();
 
     assert!(!rx.is_closed());
+    //calling the Sender
     tokio::task::spawn_blocking(move || {
         println!("Flushing Events");
         if let Err(e) = flush_previous_data(tx, journal_units) {
