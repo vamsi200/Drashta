@@ -5,12 +5,15 @@
 use crate::events;
 use crate::events::receive_data;
 use aho_corasick::AhoCorasick;
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use axum::extract::State;
-use libc::iw_pmkid_cand;
+use libc::{PRIO_PROCESS, iw_pmkid_cand};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::result::Result::Ok;
+use std::sync::Arc;
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
@@ -20,7 +23,6 @@ use std::{
 };
 use systemd::{journal::JournalRef, *};
 use tokio::sync::broadcast;
-
 pub type Entry = BTreeMap<String, String>;
 
 #[derive(Debug, Clone)]
@@ -369,29 +371,138 @@ pub fn parse_sshd_logs(map: Entry) -> Option<SshdEvent> {
     None
 }
 
-use std::mem::drop;
+#[derive(Debug, Clone)]
+pub enum LoginAttemptEvents {
+    CommandRun {
+        timestamp: String,
+        invoking_user: String,
+        tty: String,
+        pwd: String,
+        target_user: String,
+        command: String,
+    },
+    SessionOpened {
+        timestamp: String,
+        target_user: String,
+        uid: String,
+        invoking_user: String,
+        invoking_uid: String,
+    },
+}
+pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
+    // need to check furthur.. does this make any difference?
+    // static AC: Lazy<AhoCorasick> = Lazy::new(|| {
+    //     AhoCorasick::new([
+    //         "/usr/bin/su",
+    //         "sudo",
+    //         "pam_unix(sudo:session): session opened",
+    //         "pam_unix(sudo:session): session closed",
+    //     ])
+    //     .unwrap()
+    // });
+
+    static COMMAND_RUN: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?x)^(\w+)\s+:\s+TTY=(\S+)\s+;\s+PWD=(\S+)\s+;\s+USER=(\S+)\s+;\s+COMMAND=(/usr/bin/su.*)$",)
+        .unwrap()
+    });
+
+    static SESSION_OPENED: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+    r"^pam_unix\(sudo:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$"
+        ).unwrap()
+    });
+    if let Some(s) = map.get("MESSAGE") {
+        // if AC.find(s).is_none() {
+        //     return None;
+        // }
+
+        let mut timestamp = String::new();
+        if let Some(tp) = map.get("SYSLOG_TIMESTAMP") {
+            timestamp = tp.to_owned();
+        }
+
+        let s = s.trim_start();
+        if let Some(msg) = COMMAND_RUN.captures(s) {
+            let command = msg.get(5).unwrap().as_str().to_string();
+            let tty = msg.get(2).unwrap().as_str().to_string();
+            let pwd = msg.get(3).unwrap().as_str().to_string();
+            let target_user = msg.get(4).unwrap().as_str().to_string();
+            let invoking_user = msg.get(1).unwrap().as_str().to_string();
+
+            return Some(LoginAttemptEvents::CommandRun {
+                timestamp: timestamp,
+                invoking_user: invoking_user,
+                tty: tty,
+                pwd: pwd,
+                target_user: target_user,
+                command: command,
+            });
+        }
+        if let Some(caps) = SESSION_OPENED.captures(s) {
+            return Some(LoginAttemptEvents::SessionOpened {
+                timestamp: timestamp,
+                target_user: caps[1].to_string(),
+                uid: caps[2].to_string(),
+                invoking_user: caps[3].to_string(),
+                invoking_uid: caps[4].to_string(),
+            });
+        }
+    }
+
+    None
+}
+
+#[derive(Clone, Debug)]
+pub enum EventType {
+    Sshd(SshdEvent),
+    Login(LoginAttemptEvents),
+}
 
 pub fn flush_previous_data(
-    tx: tokio::sync::broadcast::Sender<SshdEvent>,
-    unit: Vec<&str>,
+    tx: tokio::sync::broadcast::Sender<EventType>,
+    unit: Option<Vec<String>>,
 ) -> Result<()> {
     let mut s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()?;
 
-    let unit_str: Vec<String> = unit.iter().map(|x| x.to_string()).collect();
-
-    for unit in unit_str.clone() {
-        s.match_add("_SYSTEMD_UNIT", unit)?;
-    }
-
-    while let Some(data) = s.next_entry()? {
-        if let Some(s) = parse_sshd_logs(data) {
-            println!("{:?}", s);
-            // if let Err(e) = tx.send(s) {
-            //     println!("Dropped");
-            // }
+    if let Some(unit) = unit {
+        for val in unit {
+            match val.as_str() {
+                "sshd.service" => {
+                    s.match_add("_SYSTEMD_UNIT", "sshd.service")?;
+                    while let Some(data) = s.next_entry()? {
+                        if let Some(ev) = parse_sshd_logs(data) {
+                            if let Err(e) = tx.send(EventType::Sshd(ev)) {
+                                println!("Dropped");
+                            }
+                        }
+                    }
+                }
+                "all" => {
+                    let mut count = 0;
+                    while let Some(data) = s.next_entry()? {
+                        if let Some(ev) = parse_login_attempts(data) {
+                            println!("{:?}", ev);
+                            // if let Err(e) = tx.send(EventType::Login(ev)) {
+                            //     println!("Dropped");
+                            // }
+                        } else {
+                            count += 1;
+                        }
+                    }
+                    println!("count - {count}");
+                }
+                _ => {}
+            }
         }
+    } else {
+        // while let Some(data) = s.next_entry()? {
+        //     parse_login_attempts(data);
+        //     // if let Err(e) = tx.send(s) {
+        //     //     println!("Dropped");
+        //     // }
+        // }
     }
 
     Ok(())
@@ -399,17 +510,15 @@ pub fn flush_previous_data(
 
 pub fn flush_upto_n_entries(
     tx: tokio::sync::broadcast::Sender<Entry>,
-    unit: Vec<&str>,
+    unit: Vec<String>,
     n: usize,
 ) -> Result<()> {
     let mut s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()?;
 
-    let unit_str: Vec<String> = unit.iter().map(|x| x.to_string()).collect();
-
-    for unit in unit_str.clone() {
-        s.match_add("_SYSTEMD_UNIT", unit)?;
+    for u in unit {
+        s.match_add("_SYSTEMD_UNIT", u)?;
     }
     s.seek_tail()?;
     s.previous()?;
@@ -428,16 +537,19 @@ pub fn flush_upto_n_entries(
     Ok(())
 }
 
-pub fn read_journal_logs(tx: tokio::sync::broadcast::Sender<Entry>, unit: Vec<&str>) -> Result<()> {
+pub fn read_journal_logs(
+    tx: tokio::sync::broadcast::Sender<Entry>,
+    unit: Vec<String>,
+) -> Result<()> {
     let mut s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()
         .unwrap();
 
-    let unit_str: Vec<String> = unit.iter().map(|x| x.to_string()).collect();
-    for unit in unit_str.clone() {
-        s.match_add("_SYSTEMD_UNIT", unit)?;
+    for u in unit {
+        s.match_add("_SYSTEMD_UNIT", u)?;
     }
+
     loop {
         while let Some(data) = s.await_next_entry(None)? {
             if let Err(e) = tx.send(data) {
