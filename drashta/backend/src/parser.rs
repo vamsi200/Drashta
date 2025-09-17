@@ -112,6 +112,10 @@ pub enum SshdEvent {
     },
 }
 
+pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
+    msg.get(i).map(|m| m.as_str().to_string())
+}
+
 pub fn parse_sshd_logs(map: Entry) -> Option<SshdEvent> {
     static AUTH_SUCCESS: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?x)^Accepted\s+(\w+)\s+for\s+(\S+)\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+ssh\d*)?\s*$").unwrap()
@@ -173,197 +177,109 @@ pub fn parse_sshd_logs(map: Entry) -> Option<SshdEvent> {
         }
 
         if let Some(msg) = AUTH_SUCCESS.captures(s) {
-            let Some(method) = msg.get(1) else {
-                return None;
-            };
-            let Some(user) = msg.get(2) else {
-                return None;
-            };
-            let Some(ip) = msg.get(3) else {
-                return None;
-            };
-            let Some(port) = msg.get(4) else {
-                return None;
-            };
-
             return Some(SshdEvent::AuthSuccess {
                 timestamp: timestamp,
-                user: user.as_str().to_string(),
-                ip: ip.as_str().to_string(),
-                port: port.as_str().to_string(),
-                method: method.as_str().to_string(),
+                user: rg_capture(&msg, 2)?,
+                ip: rg_capture(&msg, 3)?,
+                port: rg_capture(&msg, 4)?,
+                method: rg_capture(&msg, 1)?,
                 raw_msg: s.clone(),
             });
         }
 
         if let Some(msg) = AUTH_FAILURE.captures(s) {
-            let Some(method) = msg.get(1) else {
-                return None;
-            };
-            let Some(user) = msg.get(2) else {
-                return None;
-            };
-            let Some(ip) = msg.get(3) else {
-                return None;
-            };
-            let Some(port) = msg.get(4) else {
-                return None;
-            };
-
             return Some(SshdEvent::AuthFailure {
                 timestamp: timestamp,
-                user: user.as_str().to_string(),
-                ip: ip.as_str().to_string(),
-                port: port.as_str().to_string(),
-                method: method.as_str().to_string(),
+                user: rg_capture(&msg, 2)?,
+                ip: rg_capture(&msg, 3)?,
+                port: rg_capture(&msg, 4)?,
+                method: rg_capture(&msg, 1)?,
                 raw_msg: s.clone(),
             });
         }
 
         if let Some(msg) = SESSION_OPENED.captures(s) {
-            let Some(user) = msg.get(1) else {
-                return None;
-            };
-            let Some(uid) = msg.get(2) else {
-                return None;
-            };
-
             return Some(SshdEvent::SessionOpened {
-                timestamp: timestamp.clone(),
-                user: user.as_str().to_string(),
-                uid: uid.as_str().to_string(),
+                timestamp: timestamp,
+                user: rg_capture(&msg, 1)?,
+                uid: rg_capture(&msg, 2)?,
                 raw_msg: s.clone(),
             });
         }
 
         if let Some(msg) = SESSION_CLOSED.captures(s) {
-            let Some(user) = msg.get(1) else {
-                return None;
-            };
-
             return Some(SshdEvent::SessionClosed {
-                timestamp: timestamp.clone(),
-                user: user.as_str().to_string(),
+                timestamp: timestamp,
+                user: rg_capture(&msg, 1)?,
                 raw_msg: s.clone(),
             });
         }
 
         if let Some(msg) = CONNECTION_CLOSED.captures(s) {
-            let Some(user) = msg.get(1) else {
-                return None;
-            };
-            let Some(ip) = msg.get(2) else {
-                return None;
-            };
-            let Some(port) = msg.get(3) else {
-                return None;
-            };
-            let Some(message) = msg.get(4) else {
-                return None;
-            };
-
             return Some(SshdEvent::ConnectionClosed {
-                timestamp: timestamp.clone(),
-                ip: ip.as_str().to_string(),
-                port: port.as_str().to_string(),
-                user: Some(user.as_str().to_string()),
-                msg: message.as_str().to_string(),
+                timestamp: timestamp,
+                ip: rg_capture(&msg, 2)?,
+                port: rg_capture(&msg, 3)?,
+                user: Some(rg_capture(&msg, 1).unwrap()),
+                msg: rg_capture(&msg, 4)?,
                 raw_msg: s.clone(),
             });
         }
 
         for rgx in PROTOCOL_MISMATCH.iter() {
             if let Some(msg) = rgx.captures(s) {
-                let Some(ip) = msg.get(1) else {
-                    return None;
-                };
-                let Some(port) = msg.get(2) else {
-                    return None;
-                };
-
                 return Some(SshdEvent::ProtocolMismatch {
-                    timestamp: timestamp.clone(),
-                    ip: ip.as_str().to_string(),
-                    port: port.as_str().to_string(),
+                    timestamp: timestamp,
+                    ip: rg_capture(&msg, 1)?,
+                    port: rg_capture(&msg, 2)?,
                     raw_msg: s.clone(),
                 });
             }
         }
 
         if let Some(msg) = WARNING.captures(s) {
-            let Some(message) = msg.get(1) else {
-                return None;
-            };
-
             return Some(SshdEvent::Warning {
-                timestamp: timestamp.clone(),
-                msg: message.as_str().to_string(),
+                timestamp: timestamp,
+                msg: rg_capture(&msg, 1)?,
                 raw_msg: s.clone(),
             });
         }
 
         if let Some(msg) = UNKNOWN.captures(s) {
-            let Some(message) = msg.get(1) else {
-                return None;
-            };
-
             return Some(SshdEvent::Unknown {
-                timestamp: timestamp.clone(),
-                msg: message.as_str().to_string(),
+                timestamp: timestamp,
+                msg: rg_capture(&msg, 1)?,
                 raw_msg: s.clone(),
             });
         }
 
         if let Some(msg) = RECEIVED_DISCONNECT.captures(s) {
-            let Some(ip) = msg.get(1) else {
-                return None;
-            };
-            let Some(port) = msg.get(2) else {
-                return None;
-            };
-            let code = msg.get(3).map(|m| m.as_str().to_string());
-            let Some(message) = msg.get(4) else {
-                return None;
-            };
-
             return Some(SshdEvent::ReceivedDisconnect {
-                timestamp: timestamp.clone(),
-                ip: ip.as_str().to_string(),
-                port: port.as_str().to_string(),
-                code,
-                msg: message.as_str().to_string(),
+                timestamp: timestamp,
+                ip: rg_capture(&msg, 1)?,
+                port: rg_capture(&msg, 2)?,
+                code: rg_capture(&msg, 3),
+                msg: rg_capture(&msg, 4)?,
                 raw_msg: s.clone(),
             });
         }
 
         if let Some(msg) = NEGOTIATION_FAILURE.captures(s) {
-            let Some(ip) = msg.get(1) else {
-                return None;
-            };
-            let port = msg.get(2).map(|m| m.as_str().to_string());
-            let Some(details) = msg.get(3) else {
-                return None;
-            };
-
             return Some(SshdEvent::NegotiationFailure {
-                timestamp: timestamp.clone(),
-                ip: ip.as_str().to_string(),
-                port,
-                details: details.as_str().to_string(),
+                timestamp: timestamp,
+                ip: rg_capture(&msg, 1)?,
+                port: rg_capture(&msg, 2),
+                details: rg_capture(&msg, 3)?,
                 raw_msg: s.clone(),
             });
         }
 
         if let Some(msg) = TOO_MANY_AUTH.captures(s) {
-            let user = msg.get(1).map(|m| m.as_str().to_string());
-            let ip = msg.get(2).map(|m| m.as_str().to_string());
-            let port = msg.get(3).map(|m| m.as_str().to_string());
-
             return Some(SshdEvent::TooManyAuthFailures {
-                timestamp: timestamp.clone(),
-                user,
-                ip,
-                port,
+                timestamp: timestamp,
+                user: rg_capture(&msg, 1),
+                ip: rg_capture(&msg, 2),
+                port: rg_capture(&msg, 3),
                 raw_msg: s.clone(),
             });
         }
@@ -380,6 +296,7 @@ pub enum LoginAttemptEvents {
         pwd: String,
         target_user: String,
         command: String,
+        raw_msg: String,
     },
     SessionOpened {
         timestamp: String,
@@ -387,6 +304,31 @@ pub enum LoginAttemptEvents {
         uid: String,
         invoking_user: String,
         invoking_uid: String,
+        raw_msg: String,
+    },
+    SessionClosed {
+        timestamp: String,
+        target_user: String,
+        raw_msg: String,
+    },
+    AuthFailure {
+        timestamp: String,
+        logname: String,
+        uid: String,
+        euid: String,
+        tty: String,
+        ruser: String,
+        rhost: String,
+        target_user: String,
+    },
+    IncorrectPassword {
+        timestamp: String,
+        invoking_user: String,
+        attempts: String,
+        tty: String,
+        pwd: String,
+        target_user: String,
+        command: String,
     },
 }
 pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
@@ -406,11 +348,31 @@ pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
         .unwrap()
     });
 
-    static SESSION_OPENED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-    r"^pam_unix\(sudo:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$"
-        ).unwrap()
+    static SESSION_OPENED: Lazy<Vec<Regex>> = Lazy::new(|| {
+        vec![
+            Regex::new(
+            r"^pam_unix\(sudo:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$")
+            .unwrap(),
+            Regex::new(
+            r"^pam_unix\(su:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$")
+            .unwrap()
+            ]
     });
+
+    static SESSION_CLOSED: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^pam_unix\(sudo:session\):\s+session closed for user (\S+)$").unwrap()
+    });
+
+    static AUTH_FAILURE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^pam_unix\(sudo:auth\): authentication failure; logname=(\S+) uid=(\d+) euid=(\d+) tty=(\S+) ruser=(\S+) rhost=(\S*)\s+user=(\S+)$")
+        .unwrap()
+    });
+
+    static INCORRECT_PASSWORD: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^(\S+)\s+:\s+(\d+)\s+incorrect password attempt ; TTY=(\S+) ; PWD=(\S+) ; USER=(\S+) ; COMMAND=(\S+)$")
+        .unwrap()
+    });
+
     if let Some(s) = map.get("MESSAGE") {
         // if AC.find(s).is_none() {
         //     return None;
@@ -423,28 +385,60 @@ pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
 
         let s = s.trim_start();
         if let Some(msg) = COMMAND_RUN.captures(s) {
-            let command = msg.get(5).unwrap().as_str().to_string();
-            let tty = msg.get(2).unwrap().as_str().to_string();
-            let pwd = msg.get(3).unwrap().as_str().to_string();
-            let target_user = msg.get(4).unwrap().as_str().to_string();
-            let invoking_user = msg.get(1).unwrap().as_str().to_string();
-
             return Some(LoginAttemptEvents::CommandRun {
-                timestamp: timestamp,
-                invoking_user: invoking_user,
-                tty: tty,
-                pwd: pwd,
-                target_user: target_user,
-                command: command,
+                timestamp,
+                invoking_user: rg_capture(&msg, 1)?,
+                tty: rg_capture(&msg, 2)?,
+                pwd: rg_capture(&msg, 3)?,
+                target_user: rg_capture(&msg, 4)?,
+                command: rg_capture(&msg, 5)?,
+                raw_msg: s.to_string(),
             });
         }
-        if let Some(caps) = SESSION_OPENED.captures(s) {
-            return Some(LoginAttemptEvents::SessionOpened {
+
+        for rg in SESSION_OPENED.iter() {
+            if let Some(msg) = rg.captures(s) {
+                return Some(LoginAttemptEvents::SessionOpened {
+                    timestamp,
+                    target_user: rg_capture(&msg, 1)?,
+                    uid: rg_capture(&msg, 2)?,
+                    invoking_user: rg_capture(&msg, 3)?,
+                    invoking_uid: rg_capture(&msg, 4)?,
+                    raw_msg: s.to_string(),
+                });
+            }
+        }
+
+        if let Some(msg) = SESSION_CLOSED.captures(s) {
+            return Some(LoginAttemptEvents::SessionClosed {
+                timestamp,
+                target_user: rg_capture(&msg, 1)?,
+                raw_msg: s.to_string(),
+            });
+        }
+
+        if let Some(msg) = AUTH_FAILURE.captures(s) {
+            return Some(LoginAttemptEvents::AuthFailure {
                 timestamp: timestamp,
-                target_user: caps[1].to_string(),
-                uid: caps[2].to_string(),
-                invoking_user: caps[3].to_string(),
-                invoking_uid: caps[4].to_string(),
+                logname: rg_capture(&msg, 1)?,
+                uid: rg_capture(&msg, 2)?,
+                euid: rg_capture(&msg, 3)?,
+                tty: rg_capture(&msg, 4)?,
+                ruser: rg_capture(&msg, 5)?,
+                rhost: rg_capture(&msg, 6)?,
+                target_user: rg_capture(&msg, 7)?,
+            });
+        }
+
+        if let Some(msg) = INCORRECT_PASSWORD.captures(s) {
+            return Some(LoginAttemptEvents::IncorrectPassword {
+                timestamp: timestamp,
+                invoking_user: rg_capture(&msg, 1)?,
+                attempts: rg_capture(&msg, 2)?,
+                tty: rg_capture(&msg, 3)?,
+                pwd: rg_capture(&msg, 4)?,
+                target_user: rg_capture(&msg, 5)?,
+                command: rg_capture(&msg, 6)?,
             });
         }
     }
