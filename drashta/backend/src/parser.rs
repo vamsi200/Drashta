@@ -25,6 +25,7 @@ use systemd::{journal::JournalRef, *};
 use tokio::sync::broadcast;
 pub type Entry = BTreeMap<String, String>;
 
+//TODO: wth? why so many enums? figure out something else bro
 #[derive(Debug, Clone)]
 pub enum SshdEvent {
     AuthSuccess {
@@ -330,6 +331,22 @@ pub enum LoginAttemptEvents {
         target_user: String,
         command: String,
     },
+    NotInSudoers {
+        timestamp: String,
+        user: String,
+        raw_msg: String,
+    },
+    AuthError {
+        timestamp: String,
+        user: Option<String>,
+        msg: String,
+        raw_msg: String,
+    },
+    Warning {
+        timestamp: String,
+        msg: String,
+        raw_msg: String,
+    },
 }
 pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
     // need to check furthur.. does this make any difference?
@@ -372,6 +389,18 @@ pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
         Regex::new(r"^(\S+)\s+:\s+(\d+)\s+incorrect password attempt ; TTY=(\S+) ; PWD=(\S+) ; USER=(\S+) ; COMMAND=(\S+)$")
         .unwrap()
     });
+
+    static NOT_IN_SUDOERS: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?x)^\s*(?P<user>\S+)\s+is\s+not\s+in\s+the\s+sudoers\s+file").unwrap()
+    });
+
+    static AUTH_ERROR: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?x)pam_unix\(sudo:auth\):\s+(?P<msg>.+?)(?:\s+\[ (?P<user>\w+) \])?\s*$")
+            .unwrap()
+    });
+
+    static SUDO_WARNING: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?x)^sudo:\s+(?P<msg>.+)$").unwrap());
 
     if let Some(s) = map.get("MESSAGE") {
         // if AC.find(s).is_none() {
@@ -441,10 +470,35 @@ pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
                 command: rg_capture(&msg, 6)?,
             });
         }
+        if let Some(msg) = NOT_IN_SUDOERS.captures(s) {
+            return Some(LoginAttemptEvents::NotInSudoers {
+                timestamp: timestamp,
+                user: rg_capture(&msg, 1)?,
+                raw_msg: s.to_string(),
+            });
+        }
+
+        if let Some(msg) = AUTH_ERROR.captures(s) {
+            return Some(LoginAttemptEvents::AuthError {
+                timestamp: timestamp,
+                user: rg_capture(&msg, 2),
+                msg: rg_capture(&msg, 1)?,
+                raw_msg: s.to_string(),
+            });
+        }
+        if let Some(msg) = SUDO_WARNING.captures(s) {
+            return Some(LoginAttemptEvents::Warning {
+                timestamp: timestamp,
+                msg: rg_capture(&msg, 1)?,
+                raw_msg: s.to_string(),
+            });
+        }
     }
 
     None
 }
+
+// fn parse_kernel_events()
 
 #[derive(Clone, Debug)]
 pub enum EventType {
@@ -452,6 +506,7 @@ pub enum EventType {
     Login(LoginAttemptEvents),
 }
 
+//TODO: Need to check the name's of the services beacuse there are different on different distros
 pub fn flush_previous_data(
     tx: tokio::sync::broadcast::Sender<EventType>,
     unit: Option<Vec<String>>,
@@ -463,7 +518,7 @@ pub fn flush_previous_data(
     if let Some(unit) = unit {
         for val in unit {
             match val.as_str() {
-                "sshd.service" => {
+                "sshd.events" => {
                     s.match_add("_SYSTEMD_UNIT", "sshd.service")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_sshd_logs(data) {
@@ -473,19 +528,77 @@ pub fn flush_previous_data(
                         }
                     }
                 }
-                "all" => {
-                    let mut count = 0;
+
+                "sudo.events" => {
+                    s.match_add("_COMM", "su")?;
+                    s.match_add("_COMM", "sudo")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_login_attempts(data) {
                             println!("{:?}", ev);
-                            // if let Err(e) = tx.send(EventType::Login(ev)) {
-                            //     println!("Dropped");
-                            // }
-                        } else {
-                            count += 1;
                         }
                     }
-                    println!("count - {count}");
+                }
+
+                "login.events" => {
+                    s.match_add("_COMM", "login")?;
+                    s.match_add("_SYSTEMD_UNIT", "systemd-logind.service")?;
+                    while let Some(data) = s.next_entry()? {
+                        println!("{:?}", data);
+                    }
+                }
+
+                "pkg.events" => {
+                    // Not working!!
+                    s.match_add("_EXE", "/usr/bin/yay")?;
+                    s.match_add("_EXE", "/usr/bin/pacman")?;
+                    while let Some(data) = s.next_entry()? {
+                        println!("{:?}", data);
+                    }
+                }
+
+                "firewall.events" => {
+                    s.match_add("_SYSTEMD_UNIT", "firewalld.service")?;
+                    while let Some(data) = s.next_entry()? {
+                        println!("{:?}", data);
+                    }
+                }
+
+                "network.events" => {
+                    s.match_add("_SYSTEMD_UNIT", "NetworkManger.service")?;
+                    while let Some(data) = s.next_entry()? {
+                        println!("{:?}", data);
+                    }
+                }
+
+                "kernel.events" => {
+                    s.match_add("_TRANSPORT", "kernel")?;
+                    while let Some(data) = s.next_entry()? {
+                        println!("{:?}", data);
+                    }
+                }
+
+                "userchange.events" => {
+                    s.match_add("_COMM", "useradd")?;
+                    s.match_add("_COMM", "groupadd")?;
+                    s.match_add("_COMM", "passwd")?;
+                    while let Some(data) = s.next_entry()? {
+                        println!("{:?}", data);
+                    }
+                }
+
+                "config.events" => {
+                    s.match_add("_COMM", "sshd-keygen")?;
+                    s.match_add("_COMM", "scp")?; // need to add others maybe?
+                    s.match_add("_SYSTEMD_UNIT", "cronie.service")?;
+                    // s.match_add("_SYSTEMD_UNIT", "cron.service")?;
+
+                    while let Some(data) = s.next_entry()? {
+                        println!("{:?}", data);
+                    }
+                }
+
+                "all.events" => {
+                    todo!()
                 }
                 _ => {}
             }
