@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use crate::parser::{
-    Entry, SshdEvent, flush_previous_data, flush_upto_n_entries, read_journal_logs,
+    Entry, EventType, SshdEvent, flush_previous_data, flush_upto_n_entries, read_journal_logs,
 };
 use anyhow::Result;
 use axum::extract::{Query, State};
@@ -29,8 +29,14 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::{spawn_blocking, yield_now};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+
 pub struct Journalunits {
-    journal_units: Vec<&'static str>,
+    journal_units: Vec<String>,
+}
+impl Journalunits {
+    pub fn new() -> Vec<String> {
+        vec![]
+    }
 }
 
 #[derive(Deserialize)]
@@ -38,30 +44,9 @@ pub struct ChunkSize {
     size: usize,
 }
 
-impl Journalunits {
-    pub fn new() -> Vec<&'static str> {
-        // just for testing
-        vec![
-            "sshd.service",
-            // "systemd-journald.service",
-            // "systemd-logind.service",
-            // "cron.service",
-            // "rsyslog.service",
-            // "NetworkManager.service",
-            // "dhcpcd.service",
-            // "nginx.service",
-            // "apache2.service",
-            // "docker.service",
-            // "firewalld.service",
-            // "polkit.service",
-            // "udisks2.service",
-            // "bluetooth.service",
-            // "systemd-udevd.service",
-            // "postgresql.service",
-            // "mysql.service",
-            // "cups.service",
-        ]
-    }
+#[derive(Deserialize, Debug)]
+pub struct FilterEvent {
+    event_name: Option<String>,
 }
 
 fn format_thing(map: BTreeMap<String, String>) -> String {
@@ -96,21 +81,25 @@ pub async fn drain_data_upto_n(
 }
 
 pub async fn drain_backlog(
-    State(tx): State<tokio::sync::broadcast::Sender<SshdEvent>>,
+    State(tx): State<tokio::sync::broadcast::Sender<EventType>>,
+    filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let rx = tx.clone().subscribe();
+    let mut journal_units = Journalunits::new();
 
-    let journal_units = Journalunits::new();
+    match filter_event.0.event_name {
+        Some(event) => journal_units.push(event),
+        None => journal_units.clear(),
+    }
 
     assert!(!rx.is_closed());
     //calling the Sender
     tokio::task::spawn_blocking(move || {
         println!("Flushing Events");
-        if let Err(e) = flush_previous_data(tx, journal_units) {
+        if let Err(e) = flush_previous_data(tx, Some(journal_units)) {
             eprintln!("Error: {:?}", e);
         }
     });
-
     let stream = BroadcastStream::new(rx).filter_map(|res| async move {
         res.ok()
             .map(|msg| Ok(Event::default().event("test").data(format!("{:?}", msg))))
