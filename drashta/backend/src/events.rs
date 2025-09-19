@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use crate::parser::{
-    Entry, EventType, SshdEvent, flush_previous_data, flush_upto_n_entries, read_journal_logs,
+    Entry, EventData, flush_previous_data, flush_upto_n_entries, read_journal_logs,
 };
 use anyhow::Result;
 use axum::extract::{Query, State};
@@ -81,7 +81,7 @@ pub async fn drain_data_upto_n(
 }
 
 pub async fn drain_backlog(
-    State(tx): State<tokio::sync::broadcast::Sender<EventType>>,
+    State(tx): State<tokio::sync::broadcast::Sender<EventData>>,
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let rx = tx.clone().subscribe();

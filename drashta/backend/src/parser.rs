@@ -4,10 +4,10 @@
 
 use crate::events;
 use crate::events::receive_data;
+use ahash::AHashMap;
 use aho_corasick::AhoCorasick;
 use anyhow::Result;
 use axum::extract::State;
-use libc::{PRIO_PROCESS, iw_pmkid_cand};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -23,123 +23,66 @@ use std::{
 };
 use systemd::{journal::JournalRef, *};
 use tokio::sync::broadcast;
+
 pub type Entry = BTreeMap<String, String>;
 
-//TODO: wth? why so many enums? figure out something else bro
 #[derive(Debug, Clone)]
-pub enum SshdEvent {
-    AuthSuccess {
-        timestamp: String,
-        user: String,
-        ip: String,
-        port: String,
-        method: String,
-        raw_msg: String,
-    },
+pub struct EventData {
+    pub timestamp: String,
+    pub service: Service,
+    pub data: AHashMap<String, String>,
+    pub event_type: EventType,
+    pub raw_msg: String,
+}
 
-    AuthFailure {
-        timestamp: String,
-        user: String,
-        ip: String,
-        port: String,
-        method: String,
-        raw_msg: String,
-    },
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Service {
+    Sshd,
+    Sudo,
+}
 
-    SessionOpened {
-        timestamp: String,
-        user: String,
-        uid: String,
-        raw_msg: String,
-    },
-
-    SessionClosed {
-        timestamp: String,
-        user: String,
-        raw_msg: String,
-    },
-
-    ConnectionClosed {
-        timestamp: String,
-        ip: String,
-        port: String,
-        user: Option<String>,
-        msg: String,
-        raw_msg: String,
-    },
-
-    ProtocolMismatch {
-        timestamp: String,
-        ip: String,
-        port: String,
-        raw_msg: String,
-    },
-
-    Warning {
-        timestamp: String,
-        msg: String,
-        raw_msg: String,
-    },
-
-    Unknown {
-        timestamp: String,
-        msg: String,
-        raw_msg: String,
-    },
-
-    ReceivedDisconnect {
-        timestamp: String,
-        ip: String,
-        port: String,
-        code: Option<String>,
-        msg: String,
-        raw_msg: String,
-    },
-
-    NegotiationFailure {
-        timestamp: String,
-        ip: String,
-        port: Option<String>,
-        details: String,
-        raw_msg: String,
-    },
-
-    TooManyAuthFailures {
-        timestamp: String,
-        user: Option<String>,
-        ip: Option<String>,
-        port: Option<String>,
-        raw_msg: String,
-    },
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum EventType {
+    Success,
+    Failure,
+    SessionOpened,
+    SessionClosed,
+    ConnectionClosed,
+    TooManyAuthFailures,
+    Warning,
+    Info,
+    Other,
+    IncorrectPassword,
+    AuthError,
 }
 
 pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
     msg.get(i).map(|m| m.as_str().to_string())
 }
 
-pub fn parse_sshd_logs(map: Entry) -> Option<SshdEvent> {
-    static AUTH_SUCCESS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^Accepted\s+(\w+)\s+for\s+(\S+)\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+ssh\d*)?\s*$").unwrap()
-    });
+macro_rules! insert_fields {
+    ($map:expr, $msg:expr, { $($key:expr => $idx:expr),+ $(,)? }) => {
+        $(
+            $map.insert($key.to_string(), rg_capture(&$msg, $idx)?);
+        )+
+    };
+}
 
-    static AUTH_FAILURE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^Failed\s+(\w+)\s+for\s+(?:invalid\s+user\s+)?(\S+)\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+ssh\d*)?\s*$").unwrap()
+pub fn parse_sshd_logs(map: Entry) -> Option<EventData> {
+    static SSHD_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
+        vec![
+            ("AUTH_SUCCESS", Regex::new(r"(?x)^Accepted\s+(\w+)\s+for\s+(\S+)\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+ssh\d*)?\s*$").unwrap()),
+            ("AUTH_FAILURE", Regex::new(r"(?x)^Failed\s+(\w+)\s+for\s+(?:invalid\s+user\s+)?(\S+)\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+ssh\d*)?\s*$").unwrap()),
+            ("SESSION_OPENED", Regex::new(r"(?x)^pam_unix\(sshd:session\):\s+session\s+opened(?:\s+for\s+user\s+(\S+))?").unwrap()),
+            ("SESSION_CLOSED", Regex::new(r"(?x)^pam_unix\(sshd:session\):\s+session\s+closed(?:\s+for\s+user\s+(\S+))?").unwrap()),
+            ("CONNECTION_CLOSED", Regex::new(r"(?x)^Connection\s+(?:closed|reset)(?:\s+by(?:\s+authenticating\s+user)?\s+(\S+))?\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+\[([^\]]+)\])?\s*$").unwrap()),
+            ("RECEIVED_DISCONNECT", Regex::new(r"(?x)^Received\s+disconnect\s+from\s+([0-9A-Fa-f:.]+)(?:\s+port\s+(\d+))?:\s*(\d+):\s*(.+?)(?:\s+\[preauth\])?\s*$").unwrap()),
+            ("NEGOTIATION_FAILURE", Regex::new(r"(?x)^Unable\s+to\s+negotiate(?:\s+with)?\s+([0-9A-Fa-f:.]+)(?:\s+port\s+(\d+))?:\s*(?:no\s+matching|no\s+matching\s+.*\s+found|no matching .* found).*$").unwrap()),
+            ("TOO_MANY_AUTH", Regex::new(r"(?x)^(?:Disconnecting:|Disconnected:)?\s*Too\s+many\s+authentication\s+failures(?:\s+for\s+(?:invalid\s+user\s+)?(\S+))?\s*(?:\[preauth\])?\s*$").unwrap()),
+            ("WARNING", Regex::new(r"(?x)^(?:warning:|WARNING:|error:|fatal:)?\s*(.+\S)\s*$").unwrap()),
+            ("UNKNOWN", Regex::new(r"(?s)^(.*\S.*)$").unwrap()),
+        ]
     });
-
-    static SESSION_OPENED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^pam_unix\(sshd:session\):\s+session\s+opened(?:\s+for\s+user\s+(\S+))?")
-            .unwrap()
-    });
-
-    static SESSION_CLOSED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^pam_unix\(sshd:session\):\s+session\s+closed(?:\s+for\s+user\s+(\S+))?")
-            .unwrap()
-    });
-
-    static CONNECTION_CLOSED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^Connection\s+(?:closed|reset)(?:\s+by(?:\s+authenticating\s+user)?\s+(\S+))?\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+\[([^\]]+)\])?\s*$").unwrap()
-    });
-
     static PROTOCOL_MISMATCH: Lazy<Vec<Regex>> = Lazy::new(|| {
         vec![
         Regex::new(r"(?x)^kex_exchange_identification:\s*(?:read:\s*)?(Client sent invalid protocol identifier|Connection (?:closed by remote host|reset by peer))\s*$").unwrap(),
@@ -150,348 +93,402 @@ pub fn parse_sshd_logs(map: Entry) -> Option<SshdEvent> {
     ]
     });
 
-    static RECEIVED_DISCONNECT: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^Received\s+disconnect\s+from\s+([0-9A-Fa-f:.]+)(?:\s+port\s+(\d+))?:\s*(\d+):\s*(.+?)(?:\s+\[preauth\])?\s*$")
-        .unwrap()
-    });
-
-    static NEGOTIATION_FAILURE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^Unable\s+to\s+negotiate(?:\s+with)?\s+([0-9A-Fa-f:.]+)(?:\s+port\s+(\d+))?:\s*(?:no\s+matching|no\s+matching\s+.*\s+found|no matching .* found).*$")
-            .unwrap()
-    });
-
-    static TOO_MANY_AUTH: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^(?:Disconnecting:|Disconnected:)?\s*Too\s+many\s+authentication\s+failures(?:\s+for\s+(?:invalid\s+user\s+)?(\S+))?\s*(?:\[preauth\])?\s*$")
-            .unwrap()
-    });
-
-    static WARNING: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^(?:warning:|WARNING:|error:|fatal:)?\s*(.+\S)\s*$").unwrap()
-    });
-
-    static UNKNOWN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)^(.*\S.*)$").unwrap());
-
     if let Some(s) = map.get("MESSAGE") {
         let mut timestamp = String::new();
         if let Some(tp) = map.get("SYSLOG_TIMESTAMP") {
             timestamp = tp.to_owned();
         }
+        let mut map = AHashMap::new();
 
-        if let Some(msg) = AUTH_SUCCESS.captures(s) {
-            return Some(SshdEvent::AuthSuccess {
-                timestamp: timestamp,
-                user: rg_capture(&msg, 2)?,
-                ip: rg_capture(&msg, 3)?,
-                port: rg_capture(&msg, 4)?,
-                method: rg_capture(&msg, 1)?,
-                raw_msg: s.clone(),
-            });
-        }
+        for (name, regex) in SSHD_REGEX.iter() {
+            if let Some(msg) = regex.captures(s) {
+                match *name {
+                    "AUTH_SUCCESS" => {
+                        insert_fields!(map, msg,{
+                            "user" => 2,
+                            "ip" => 3,
+                            "port" => 4,
+                            "method" => 1,
+                        });
 
-        if let Some(msg) = AUTH_FAILURE.captures(s) {
-            return Some(SshdEvent::AuthFailure {
-                timestamp: timestamp,
-                user: rg_capture(&msg, 2)?,
-                ip: rg_capture(&msg, 3)?,
-                port: rg_capture(&msg, 4)?,
-                method: rg_capture(&msg, 1)?,
-                raw_msg: s.clone(),
-            });
-        }
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::Success,
+                            raw_msg: s.clone(),
+                        };
+                        return Some(ev);
+                    }
+                    "AUTH_FAILURE" => {
+                        insert_fields!(map, msg,{
+                            "user" => 2,
+                            "ip" => 3,
+                            "port" => 4,
+                            "method" => 1,
+                        });
 
-        if let Some(msg) = SESSION_OPENED.captures(s) {
-            return Some(SshdEvent::SessionOpened {
-                timestamp: timestamp,
-                user: rg_capture(&msg, 1)?,
-                uid: rg_capture(&msg, 2)?,
-                raw_msg: s.clone(),
-            });
-        }
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::Failure,
+                            raw_msg: s.clone(),
+                        };
 
-        if let Some(msg) = SESSION_CLOSED.captures(s) {
-            return Some(SshdEvent::SessionClosed {
-                timestamp: timestamp,
-                user: rg_capture(&msg, 1)?,
-                raw_msg: s.clone(),
-            });
-        }
+                        return Some(ev);
+                    }
+                    "SESSION_OPENED" => {
+                        insert_fields!(map, msg, {
+                            "user" => 1,
+                            "uid" => 2,
+                        });
 
-        if let Some(msg) = CONNECTION_CLOSED.captures(s) {
-            return Some(SshdEvent::ConnectionClosed {
-                timestamp: timestamp,
-                ip: rg_capture(&msg, 2)?,
-                port: rg_capture(&msg, 3)?,
-                user: Some(rg_capture(&msg, 1).unwrap()),
-                msg: rg_capture(&msg, 4)?,
-                raw_msg: s.clone(),
-            });
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::SessionOpened,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "SESSION_CLOSED" => {
+                        insert_fields!(map, msg, {
+                            "user" => 1,
+                        });
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::SessionClosed,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "CONNECTION_CLOSED" => {
+                        insert_fields!(map, msg, {
+                            "user" => 1,
+                            "ip" => 2,
+                            "port" => 3,
+                            "msg" => 4,
+                        });
+
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::ConnectionClosed,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "WARNING" => {
+                        insert_fields!(map, msg, {
+                            "msg" => 1,
+                        });
+
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::Warning,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "UNKNOWN" => {
+                        insert_fields!(map, msg, {
+                            "msg" => 1,
+                        });
+
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::Other,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "RECEIVED_DISCONNECT" => {
+                        insert_fields!(map, msg, {
+                            "ip" => 1,
+                            "port" => 2,
+                            "code" => 3,
+                            "msg" => 4,
+                        });
+
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::Other,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "NEGOTIATION_FAILURE" => {
+                        insert_fields!(map, msg, {
+                            "ip" => 1,
+                            "port" => 2,
+                            "details" => 3,
+                        });
+
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::Other,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "TOO_MANY_AUTH" => {
+                        insert_fields!(map, msg, {
+                            "user" => 1,
+                            "ip" => 2,
+                            "port" => 3,
+                        });
+
+                        let ev = EventData {
+                            timestamp: timestamp,
+                            service: Service::Sshd,
+                            data: map,
+                            event_type: EventType::TooManyAuthFailures,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    _ => {}
+                }
+            }
         }
 
         for rgx in PROTOCOL_MISMATCH.iter() {
             if let Some(msg) = rgx.captures(s) {
-                return Some(SshdEvent::ProtocolMismatch {
-                    timestamp: timestamp,
-                    ip: rg_capture(&msg, 1)?,
-                    port: rg_capture(&msg, 2)?,
-                    raw_msg: s.clone(),
+                insert_fields!(map, msg, {
+                    "ip" => 2,
+                    "port" => 3,
                 });
+
+                let ev = EventData {
+                    timestamp: timestamp,
+                    service: Service::Sshd,
+                    data: map,
+                    event_type: EventType::Other,
+                    raw_msg: s.clone(),
+                };
+
+                return Some(ev);
             }
-        }
-
-        if let Some(msg) = WARNING.captures(s) {
-            return Some(SshdEvent::Warning {
-                timestamp: timestamp,
-                msg: rg_capture(&msg, 1)?,
-                raw_msg: s.clone(),
-            });
-        }
-
-        if let Some(msg) = UNKNOWN.captures(s) {
-            return Some(SshdEvent::Unknown {
-                timestamp: timestamp,
-                msg: rg_capture(&msg, 1)?,
-                raw_msg: s.clone(),
-            });
-        }
-
-        if let Some(msg) = RECEIVED_DISCONNECT.captures(s) {
-            return Some(SshdEvent::ReceivedDisconnect {
-                timestamp: timestamp,
-                ip: rg_capture(&msg, 1)?,
-                port: rg_capture(&msg, 2)?,
-                code: rg_capture(&msg, 3),
-                msg: rg_capture(&msg, 4)?,
-                raw_msg: s.clone(),
-            });
-        }
-
-        if let Some(msg) = NEGOTIATION_FAILURE.captures(s) {
-            return Some(SshdEvent::NegotiationFailure {
-                timestamp: timestamp,
-                ip: rg_capture(&msg, 1)?,
-                port: rg_capture(&msg, 2),
-                details: rg_capture(&msg, 3)?,
-                raw_msg: s.clone(),
-            });
-        }
-
-        if let Some(msg) = TOO_MANY_AUTH.captures(s) {
-            return Some(SshdEvent::TooManyAuthFailures {
-                timestamp: timestamp,
-                user: rg_capture(&msg, 1),
-                ip: rg_capture(&msg, 2),
-                port: rg_capture(&msg, 3),
-                raw_msg: s.clone(),
-            });
         }
     }
     None
 }
 
-#[derive(Debug, Clone)]
-pub enum LoginAttemptEvents {
-    CommandRun {
-        timestamp: String,
-        invoking_user: String,
-        tty: String,
-        pwd: String,
-        target_user: String,
-        command: String,
-        raw_msg: String,
-    },
-    SessionOpened {
-        timestamp: String,
-        target_user: String,
-        uid: String,
-        invoking_user: String,
-        invoking_uid: String,
-        raw_msg: String,
-    },
-    SessionClosed {
-        timestamp: String,
-        target_user: String,
-        raw_msg: String,
-    },
-    AuthFailure {
-        timestamp: String,
-        logname: String,
-        uid: String,
-        euid: String,
-        tty: String,
-        ruser: String,
-        rhost: String,
-        target_user: String,
-    },
-    IncorrectPassword {
-        timestamp: String,
-        invoking_user: String,
-        attempts: String,
-        tty: String,
-        pwd: String,
-        target_user: String,
-        command: String,
-    },
-    NotInSudoers {
-        timestamp: String,
-        user: String,
-        raw_msg: String,
-    },
-    AuthError {
-        timestamp: String,
-        user: Option<String>,
-        msg: String,
-        raw_msg: String,
-    },
-    Warning {
-        timestamp: String,
-        msg: String,
-        raw_msg: String,
-    },
-}
-pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
-    // need to check furthur.. does this make any difference?
-    // static AC: Lazy<AhoCorasick> = Lazy::new(|| {
-    //     AhoCorasick::new([
-    //         "/usr/bin/su",
-    //         "sudo",
-    //         "pam_unix(sudo:session): session opened",
-    //         "pam_unix(sudo:session): session closed",
-    //     ])
-    //     .unwrap()
-    // });
-
-    static COMMAND_RUN: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^(\w+)\s+:\s+TTY=(\S+)\s+;\s+PWD=(\S+)\s+;\s+USER=(\S+)\s+;\s+COMMAND=(/usr/bin/su.*)$",)
-        .unwrap()
-    });
-
-    static SESSION_OPENED: Lazy<Vec<Regex>> = Lazy::new(|| {
+pub fn parse_sudo_login_attempts(map: Entry) -> Option<EventData> {
+    static SUDO_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
-            Regex::new(
-            r"^pam_unix\(sudo:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$")
-            .unwrap(),
-            Regex::new(
-            r"^pam_unix\(su:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$")
-            .unwrap()
-            ]
+            ("COMMAND_RUN", Regex::new(r"(?x)^(\w+)\s+:\s+TTY=(\S+)\s+;\s+PWD=(\S+)\s+;\s+USER=(\S+)\s+;\s+COMMAND=(/usr/bin/su.*)$").unwrap()),
+            ("SESSION_OPENED_SUDO", Regex::new(r"^pam_unix\(sudo:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$").unwrap()),
+            ("SESSION_OPENED_SU", Regex::new(r"^pam_unix\(su:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$").unwrap()),
+            ("SESSION_CLOSED", Regex::new(r"^pam_unix\(sudo:session\):\s+session closed for user (\S+)$").unwrap()),
+            ("AUTH_FAILURE", Regex::new(r"^pam_unix\(sudo:auth\): authentication failure; logname=(\S+) uid=(\d+) euid=(\d+) tty=(\S+) ruser=(\S+) rhost=(\S*)\s+user=(\S+)$").unwrap()),
+            ("INCORRECT_PASSWORD", Regex::new(r"^(\S+)\s+:\s+(\d+)\s+incorrect password attempt ; TTY=(\S+) ; PWD=(\S+) ; USER=(\S+) ; COMMAND=(\S+)$").unwrap()),
+            ("NOT_IN_SUDOERS", Regex::new(r"(?x)^\s*(?P<user>\S+)\s+is\s+not\s+in\s+the\s+sudoers\s+file").unwrap()),
+            ("AUTH_ERROR", Regex::new(r"(?x)pam_unix\(sudo:auth\):\s+(?P<msg>.+?)(?:\s+\[ (?P<user>\w+) \])?\s*$").unwrap()),
+            ("SUDO_WARNING", Regex::new(r"(?x)^sudo:\s+(?P<msg>.+)$").unwrap()),
+        ]
     });
-
-    static SESSION_CLOSED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^pam_unix\(sudo:session\):\s+session closed for user (\S+)$").unwrap()
-    });
-
-    static AUTH_FAILURE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^pam_unix\(sudo:auth\): authentication failure; logname=(\S+) uid=(\d+) euid=(\d+) tty=(\S+) ruser=(\S+) rhost=(\S*)\s+user=(\S+)$")
-        .unwrap()
-    });
-
-    static INCORRECT_PASSWORD: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^(\S+)\s+:\s+(\d+)\s+incorrect password attempt ; TTY=(\S+) ; PWD=(\S+) ; USER=(\S+) ; COMMAND=(\S+)$")
-        .unwrap()
-    });
-
-    static NOT_IN_SUDOERS: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)^\s*(?P<user>\S+)\s+is\s+not\s+in\s+the\s+sudoers\s+file").unwrap()
-    });
-
-    static AUTH_ERROR: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?x)pam_unix\(sudo:auth\):\s+(?P<msg>.+?)(?:\s+\[ (?P<user>\w+) \])?\s*$")
-            .unwrap()
-    });
-
-    static SUDO_WARNING: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?x)^sudo:\s+(?P<msg>.+)$").unwrap());
 
     if let Some(s) = map.get("MESSAGE") {
-        // if AC.find(s).is_none() {
-        //     return None;
-        // }
-
         let mut timestamp = String::new();
         if let Some(tp) = map.get("SYSLOG_TIMESTAMP") {
             timestamp = tp.to_owned();
         }
+        let mut map = AHashMap::new();
+        let trim_msg = s.trim_start();
 
-        let s = s.trim_start();
-        if let Some(msg) = COMMAND_RUN.captures(s) {
-            return Some(LoginAttemptEvents::CommandRun {
-                timestamp,
-                invoking_user: rg_capture(&msg, 1)?,
-                tty: rg_capture(&msg, 2)?,
-                pwd: rg_capture(&msg, 3)?,
-                target_user: rg_capture(&msg, 4)?,
-                command: rg_capture(&msg, 5)?,
-                raw_msg: s.to_string(),
-            });
-        }
+        for (name, regex) in SUDO_REGEX.iter() {
+            if let Some(msg) = regex.captures(trim_msg) {
+                match *name {
+                    "COMMAND_RUN" => {
+                        insert_fields!(map, msg, {
+                            "invoking_user" => 1,
+                            "tty" => 2,
+                            "pwd" => 3,
+                            "target_user" => 4,
+                            "command" => 5,
+                        });
 
-        for rg in SESSION_OPENED.iter() {
-            if let Some(msg) = rg.captures(s) {
-                return Some(LoginAttemptEvents::SessionOpened {
-                    timestamp,
-                    target_user: rg_capture(&msg, 1)?,
-                    uid: rg_capture(&msg, 2)?,
-                    invoking_user: rg_capture(&msg, 3)?,
-                    invoking_uid: rg_capture(&msg, 4)?,
-                    raw_msg: s.to_string(),
-                });
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::Info,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    _ => {}
+                }
             }
-        }
+            if let Some(msg) = regex.captures(s) {
+                match *name {
+                    "SESSION_OPENED_SU" => {
+                        insert_fields!(map, msg, {
+                            "target_user" => 1,
+                            "uid" => 2,
+                            "invoking_user" => 3,
+                            "invoking_uid" => 4,
+                        });
 
-        if let Some(msg) = SESSION_CLOSED.captures(s) {
-            return Some(LoginAttemptEvents::SessionClosed {
-                timestamp,
-                target_user: rg_capture(&msg, 1)?,
-                raw_msg: s.to_string(),
-            });
-        }
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::SessionOpened,
+                            raw_msg: s.clone(),
+                        };
 
-        if let Some(msg) = AUTH_FAILURE.captures(s) {
-            return Some(LoginAttemptEvents::AuthFailure {
-                timestamp: timestamp,
-                logname: rg_capture(&msg, 1)?,
-                uid: rg_capture(&msg, 2)?,
-                euid: rg_capture(&msg, 3)?,
-                tty: rg_capture(&msg, 4)?,
-                ruser: rg_capture(&msg, 5)?,
-                rhost: rg_capture(&msg, 6)?,
-                target_user: rg_capture(&msg, 7)?,
-            });
-        }
+                        return Some(ev);
+                    }
+                    "SESSION_OPENED_SUDO" => {
+                        insert_fields!(map, msg, {
+                            "target_user" => 1,
+                            "uid" => 2,
+                            "invoking_user" => 3,
+                            "invoking_uid" => 4,
+                        });
 
-        if let Some(msg) = INCORRECT_PASSWORD.captures(s) {
-            return Some(LoginAttemptEvents::IncorrectPassword {
-                timestamp: timestamp,
-                invoking_user: rg_capture(&msg, 1)?,
-                attempts: rg_capture(&msg, 2)?,
-                tty: rg_capture(&msg, 3)?,
-                pwd: rg_capture(&msg, 4)?,
-                target_user: rg_capture(&msg, 5)?,
-                command: rg_capture(&msg, 6)?,
-            });
-        }
-        if let Some(msg) = NOT_IN_SUDOERS.captures(s) {
-            return Some(LoginAttemptEvents::NotInSudoers {
-                timestamp: timestamp,
-                user: rg_capture(&msg, 1)?,
-                raw_msg: s.to_string(),
-            });
-        }
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::SessionOpened,
+                            raw_msg: s.clone(),
+                        };
 
-        if let Some(msg) = AUTH_ERROR.captures(s) {
-            return Some(LoginAttemptEvents::AuthError {
-                timestamp: timestamp,
-                user: rg_capture(&msg, 2),
-                msg: rg_capture(&msg, 1)?,
-                raw_msg: s.to_string(),
-            });
-        }
-        if let Some(msg) = SUDO_WARNING.captures(s) {
-            return Some(LoginAttemptEvents::Warning {
-                timestamp: timestamp,
-                msg: rg_capture(&msg, 1)?,
-                raw_msg: s.to_string(),
-            });
+                        return Some(ev);
+                    }
+                    "SESSION_CLOSED" => {
+                        insert_fields!(map, msg, {
+                            "target_user" => 1,
+                        });
+
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::SessionClosed,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "AUTH_FAILURE" => {
+                        insert_fields!(map, msg, {
+                            "logname" => 1,
+                            "uid" => 2,
+                            "euid" => 3,
+                            "tty" => 4,
+                            "ruser" => 5,
+                            "rhost" => 6,
+                            "target_user" => 7,
+                        });
+
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::Failure,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "INCORRECT_PASSWORD" => {
+                        insert_fields!(map, msg, {
+                            "invoking_user" => 1,
+                            "attempts" => 2,
+                            "tty" => 3,
+                            "pwd" => 4,
+                            "target_user" => 5,
+                            "command" => 6,
+                        });
+
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::IncorrectPassword,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "NOT_IN_SUDOERS" => {
+                        insert_fields!(map, msg, {
+                            "user" => 1,
+                        });
+
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::Info,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "AUTH_ERROR" => {
+                        insert_fields!(map, msg, {
+                            "msg" => 1,
+                        });
+
+                        if let Some(user) = rg_capture(&msg, 2) {
+                            map.insert("user".to_string(), user);
+                        }
+
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::AuthError,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    "SUDO_WARNING" => {
+                        insert_fields!(map, msg, {
+                            "msg" => 1,
+                        });
+
+                        let ev = EventData {
+                            timestamp,
+                            service: Service::Sudo,
+                            data: map,
+                            event_type: EventType::Warning,
+                            raw_msg: s.clone(),
+                        };
+
+                        return Some(ev);
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -500,15 +497,9 @@ pub fn parse_login_attempts(map: Entry) -> Option<LoginAttemptEvents> {
 
 // fn parse_kernel_events()
 
-#[derive(Clone, Debug)]
-pub enum EventType {
-    Sshd(SshdEvent),
-    Login(LoginAttemptEvents),
-}
-
 //TODO: Need to check the name's of the services beacuse there are different on different distros
 pub fn flush_previous_data(
-    tx: tokio::sync::broadcast::Sender<EventType>,
+    tx: tokio::sync::broadcast::Sender<EventData>,
     unit: Option<Vec<String>>,
 ) -> Result<()> {
     let mut s: Journal = journal::OpenOptions::default()
@@ -522,7 +513,7 @@ pub fn flush_previous_data(
                     s.match_add("_SYSTEMD_UNIT", "sshd.service")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_sshd_logs(data) {
-                            if let Err(e) = tx.send(EventType::Sshd(ev)) {
+                            if let Err(e) = tx.send(ev) {
                                 println!("Dropped");
                             }
                         }
@@ -533,8 +524,13 @@ pub fn flush_previous_data(
                     s.match_add("_COMM", "su")?;
                     s.match_add("_COMM", "sudo")?;
                     while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_login_attempts(data) {
-                            println!("{:?}", ev);
+                        if let Some(ev) = parse_sudo_login_attempts(data) {
+                            match ev.event_type {
+                                EventType::Info => {
+                                    println!("{:?}", ev);
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
