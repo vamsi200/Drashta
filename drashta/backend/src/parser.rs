@@ -30,8 +30,8 @@ pub type Entry = BTreeMap<String, String>;
 pub struct EventData {
     pub timestamp: String,
     pub service: Service,
-    pub data: AHashMap<String, String>,
     pub event_type: EventType,
+    pub data: AHashMap<String, String>,
     pub raw_msg: String,
 }
 
@@ -39,6 +39,7 @@ pub struct EventData {
 pub enum Service {
     Sshd,
     Sudo,
+    Login,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -54,6 +55,7 @@ pub enum EventType {
     Other,
     IncorrectPassword,
     AuthError,
+    AuthFailure,
 }
 
 pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
@@ -68,7 +70,7 @@ macro_rules! insert_fields {
     };
 }
 
-pub fn parse_sshd_logs(map: Entry) -> Option<EventData> {
+pub fn parse_sshd_logs(entry_map: Entry) -> Option<EventData> {
     static SSHD_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
             ("AUTH_SUCCESS", Regex::new(r"(?x)^Accepted\s+(\w+)\s+for\s+(\S+)\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+ssh\d*)?\s*$").unwrap()),
@@ -93,183 +95,72 @@ pub fn parse_sshd_logs(map: Entry) -> Option<EventData> {
     ]
     });
 
-    if let Some(s) = map.get("MESSAGE") {
+    let mut map = AHashMap::new();
+    if let Some(s) = entry_map.get("MESSAGE") {
         let mut timestamp = String::new();
-        if let Some(tp) = map.get("SYSLOG_TIMESTAMP") {
+        if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
             timestamp = tp.to_owned();
         }
-        let mut map = AHashMap::new();
 
         for (name, regex) in SSHD_REGEX.iter() {
             if let Some(msg) = regex.captures(s) {
-                match *name {
-                    "AUTH_SUCCESS" => {
-                        insert_fields!(map, msg,{
-                            "user" => 2,
-                            "ip" => 3,
-                            "port" => 4,
-                            "method" => 1,
-                        });
+                let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                    "AUTH_SUCCESS" => (
+                        Some(&[("user", 2), ("ip", 3), ("port", 4), ("method", 1)]),
+                        EventType::Success,
+                    ),
+                    "AUTH_FAILURE" => (
+                        Some(&[("method", 1), ("user", 2), ("ip", 3), ("port", 4)]),
+                        EventType::Failure,
+                    ),
 
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::Success,
-                            raw_msg: s.clone(),
-                        };
-                        return Some(ev);
-                    }
-                    "AUTH_FAILURE" => {
-                        insert_fields!(map, msg,{
-                            "user" => 2,
-                            "ip" => 3,
-                            "port" => 4,
-                            "method" => 1,
-                        });
-
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::Failure,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
                     "SESSION_OPENED" => {
-                        insert_fields!(map, msg, {
-                            "user" => 1,
-                            "uid" => 2,
-                        });
-
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::SessionOpened,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
+                        (Some(&[("user", 1), ("uid", 2)]), EventType::SessionOpened)
                     }
-                    "SESSION_CLOSED" => {
-                        insert_fields!(map, msg, {
-                            "user" => 1,
-                        });
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::SessionClosed,
-                            raw_msg: s.clone(),
-                        };
 
-                        return Some(ev);
+                    "SESSION_CLOSED" => (Some(&[("user", 1)]), EventType::SessionClosed),
+
+                    "CONNECTION_CLOSED" => (
+                        Some(&[("user", 1), ("ip", 2), ("port", 3), ("msg", 4)]),
+                        EventType::ConnectionClosed,
+                    ),
+
+                    "WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
+                    "UNKNOWN" => (Some(&[("msg", 1)]), EventType::Other),
+
+                    "RECEIVED_DISCONNECT" => (
+                        Some(&[("ip", 1), ("port", 2), ("code", 3), ("msg", 4)]),
+                        EventType::Other,
+                    ),
+
+                    "NEGOTIATION_FAILURE" => (
+                        Some(&[("ip", 1), ("port", 2), ("details", 3)]),
+                        EventType::Other,
+                    ),
+
+                    "TOO_MANY_AUTH" => (
+                        Some(&[("user", 1), ("ip", 2), ("port", 3)]),
+                        EventType::TooManyAuthFailures,
+                    ),
+
+                    _ => (None, EventType::Other),
+                };
+
+                if let Some(fields) = data {
+                    for &(name, idx) in fields {
+                        if let Some(m) = msg.get(idx) {
+                            map.insert(name.to_string(), m.as_str().to_string());
+                        }
                     }
-                    "CONNECTION_CLOSED" => {
-                        insert_fields!(map, msg, {
-                            "user" => 1,
-                            "ip" => 2,
-                            "port" => 3,
-                            "msg" => 4,
-                        });
-
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::ConnectionClosed,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    "WARNING" => {
-                        insert_fields!(map, msg, {
-                            "msg" => 1,
-                        });
-
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::Warning,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    "UNKNOWN" => {
-                        insert_fields!(map, msg, {
-                            "msg" => 1,
-                        });
-
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::Other,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    "RECEIVED_DISCONNECT" => {
-                        insert_fields!(map, msg, {
-                            "ip" => 1,
-                            "port" => 2,
-                            "code" => 3,
-                            "msg" => 4,
-                        });
-
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::Other,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    "NEGOTIATION_FAILURE" => {
-                        insert_fields!(map, msg, {
-                            "ip" => 1,
-                            "port" => 2,
-                            "details" => 3,
-                        });
-
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::Other,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    "TOO_MANY_AUTH" => {
-                        insert_fields!(map, msg, {
-                            "user" => 1,
-                            "ip" => 2,
-                            "port" => 3,
-                        });
-
-                        let ev = EventData {
-                            timestamp: timestamp,
-                            service: Service::Sshd,
-                            data: map,
-                            event_type: EventType::TooManyAuthFailures,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    _ => {}
                 }
+
+                return Some(EventData {
+                    timestamp,
+                    service: Service::Sshd,
+                    data: map,
+                    event_type,
+                    raw_msg: s.clone(),
+                });
             }
         }
 
@@ -284,7 +175,7 @@ pub fn parse_sshd_logs(map: Entry) -> Option<EventData> {
                     timestamp: timestamp,
                     service: Service::Sshd,
                     data: map,
-                    event_type: EventType::Other,
+                    event_type: EventType::Info,
                     raw_msg: s.clone(),
                 };
 
@@ -295,7 +186,7 @@ pub fn parse_sshd_logs(map: Entry) -> Option<EventData> {
     None
 }
 
-pub fn parse_sudo_login_attempts(map: Entry) -> Option<EventData> {
+pub fn parse_sudo_login_attempts(entry_map: Entry) -> Option<EventData> {
     static SUDO_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
             ("COMMAND_RUN", Regex::new(r"(?x)^(\w+)\s+:\s+TTY=(\S+)\s+;\s+PWD=(\S+)\s+;\s+USER=(\S+)\s+;\s+COMMAND=(/usr/bin/su.*)$").unwrap()),
@@ -310,189 +201,234 @@ pub fn parse_sudo_login_attempts(map: Entry) -> Option<EventData> {
         ]
     });
 
-    if let Some(s) = map.get("MESSAGE") {
+    let mut map = AHashMap::new();
+    if let Some(s) = entry_map.get("MESSAGE") {
         let mut timestamp = String::new();
-        if let Some(tp) = map.get("SYSLOG_TIMESTAMP") {
+        if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
             timestamp = tp.to_owned();
         }
-        let mut map = AHashMap::new();
         let trim_msg = s.trim_start();
 
         for (name, regex) in SUDO_REGEX.iter() {
             if let Some(msg) = regex.captures(trim_msg) {
-                match *name {
-                    "COMMAND_RUN" => {
-                        insert_fields!(map, msg, {
-                            "invoking_user" => 1,
-                            "tty" => 2,
-                            "pwd" => 3,
-                            "target_user" => 4,
-                            "command" => 5,
-                        });
-
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::Info,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
+                let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                    "COMMAND_RUN" => (
+                        Some(&[
+                            ("invoking_user", 1),
+                            ("tty", 2),
+                            ("pwd", 3),
+                            ("target_user", 4),
+                            ("command", 5),
+                        ]),
+                        EventType::Info,
+                    ),
+                    _ => (None, EventType::Other),
+                };
+                if let Some(fields) = data {
+                    for &(name, idx) in fields {
+                        if let Some(m) = msg.get(idx) {
+                            map.insert(name.to_string(), m.as_str().to_string());
+                        }
                     }
-                    _ => {}
                 }
+                return Some(EventData {
+                    timestamp,
+                    service: Service::Sudo,
+                    data: map,
+                    event_type,
+                    raw_msg: s.clone(),
+                });
             }
             if let Some(msg) = regex.captures(s) {
-                match *name {
-                    "SESSION_OPENED_SU" => {
-                        insert_fields!(map, msg, {
-                            "target_user" => 1,
-                            "uid" => 2,
-                            "invoking_user" => 3,
-                            "invoking_uid" => 4,
-                        });
+                let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                    "SESSION_OPENED_SU" => (
+                        Some(&[
+                            ("target_user", 1),
+                            ("uid", 2),
+                            ("invoking_user", 3),
+                            ("invoking_uid", 4),
+                        ]),
+                        EventType::SessionOpened,
+                    ),
 
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::SessionOpened,
-                            raw_msg: s.clone(),
-                        };
+                    "SESSION_OPENED_SUDO" => (
+                        Some(&[
+                            ("target_user", 1),
+                            ("uid", 2),
+                            ("invoking_user", 3),
+                            ("invoking_uid", 4),
+                        ]),
+                        EventType::SessionOpened,
+                    ),
 
-                        return Some(ev);
-                    }
-                    "SESSION_OPENED_SUDO" => {
-                        insert_fields!(map, msg, {
-                            "target_user" => 1,
-                            "uid" => 2,
-                            "invoking_user" => 3,
-                            "invoking_uid" => 4,
-                        });
+                    "SESSION_CLOSED" => (Some(&[("target_user", 1)]), EventType::SessionClosed),
 
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::SessionOpened,
-                            raw_msg: s.clone(),
-                        };
+                    "AUTH_FAILURE" => (
+                        Some(&[
+                            ("logname", 1),
+                            ("uid", 2),
+                            ("euid", 3),
+                            ("tty", 4),
+                            ("ruser", 5),
+                            ("rhost", 6),
+                            ("target_user", 7),
+                        ]),
+                        EventType::Failure,
+                    ),
+                    "INCORRECT_PASSWORD" => (
+                        Some(&[
+                            ("invoking_user", 1),
+                            ("attempts", 2),
+                            ("tty", 3),
+                            ("pwd", 4),
+                            ("target_user", 5),
+                            ("command", 6),
+                        ]),
+                        EventType::IncorrectPassword,
+                    ),
 
-                        return Some(ev);
-                    }
-                    "SESSION_CLOSED" => {
-                        insert_fields!(map, msg, {
-                            "target_user" => 1,
-                        });
+                    "NOT_IN_SUDOERS" => (Some(&[("user", 1)]), EventType::Info),
 
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::SessionClosed,
-                            raw_msg: s.clone(),
-                        };
+                    "AUTH_ERROR" => (Some(&[("msg", 1)]), EventType::AuthError),
 
-                        return Some(ev);
-                    }
-                    "AUTH_FAILURE" => {
-                        insert_fields!(map, msg, {
-                            "logname" => 1,
-                            "uid" => 2,
-                            "euid" => 3,
-                            "tty" => 4,
-                            "ruser" => 5,
-                            "rhost" => 6,
-                            "target_user" => 7,
-                        });
+                    "SUDO_WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
 
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::Failure,
-                            raw_msg: s.clone(),
-                        };
+                    _ => (None, EventType::Other),
+                };
 
-                        return Some(ev);
-                    }
-                    "INCORRECT_PASSWORD" => {
-                        insert_fields!(map, msg, {
-                            "invoking_user" => 1,
-                            "attempts" => 2,
-                            "tty" => 3,
-                            "pwd" => 4,
-                            "target_user" => 5,
-                            "command" => 6,
-                        });
-
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::IncorrectPassword,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    "NOT_IN_SUDOERS" => {
-                        insert_fields!(map, msg, {
-                            "user" => 1,
-                        });
-
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::Info,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    "AUTH_ERROR" => {
-                        insert_fields!(map, msg, {
-                            "msg" => 1,
-                        });
-
-                        if let Some(user) = rg_capture(&msg, 2) {
-                            map.insert("user".to_string(), user);
+                if let Some(fields) = data {
+                    for &(name, idx) in fields {
+                        if let Some(m) = msg.get(idx) {
+                            map.insert(name.to_string(), m.as_str().to_string());
                         }
-
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::AuthError,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
                     }
-                    "SUDO_WARNING" => {
-                        insert_fields!(map, msg, {
-                            "msg" => 1,
-                        });
-
-                        let ev = EventData {
-                            timestamp,
-                            service: Service::Sudo,
-                            data: map,
-                            event_type: EventType::Warning,
-                            raw_msg: s.clone(),
-                        };
-
-                        return Some(ev);
-                    }
-                    _ => {}
                 }
+                if *name == "AUTH_ERROR" {
+                    if let Some(user) = msg.get(2) {
+                        map.insert("user".to_string(), user.as_str().to_string());
+                    }
+                }
+
+                return Some(EventData {
+                    timestamp,
+                    service: Service::Sudo,
+                    data: map,
+                    event_type,
+                    raw_msg: s.clone(),
+                });
             }
         }
     }
 
     None
+}
+
+pub fn parse_login_attempts(entry_map: Entry) -> Option<EventData> {
+    static LOGIN_REGEXES: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
+        vec![
+        ("AUTH_FAILURE", Regex::new(r"^pam_unix\(login:auth\): authentication failure; logname=(\S+) uid=(\d+) euid=(\d+) tty=(\S+) ruser=(\S*) rhost=(\S*)$").unwrap()),
+        ("AUTH_CHECK_PASS", Regex::new(r"^pam_unix\(login:auth\): check pass; user unknown$").unwrap()),
+        ("AUTH_USER_UNKNOWN", Regex::new(r"^pam_unix\(login:auth\): user (\S+) unknown$").unwrap()),
+        ("FAILL0CK_USER_UNKNOWN", Regex::new(r"^pam_faillock\(login:auth\): User unknown$").unwrap()),
+        ("NOLOGIN_REFUSED", Regex::new(r"^pam_nologin\(login:auth\): Refused user (\S+)").unwrap()),
+        ("ACCOUNT_EXPIRED", Regex::new(r"^pam_unix\(login:account\): account (\S+) has expired.*$").unwrap()),
+        ("SESSION_OPENED", Regex::new(r"^pam_unix\(login:session\): session opened for user (\S+)\(uid=(\d+)\) by LOGIN\(uid=(\d+)\)$").unwrap()),
+        ("SESSION_CLOSED", Regex::new(r"^pam_unix\(login:session\): session closed for user (\S+)$").unwrap()),
+        ("LOGIN_SUCCESS", Regex::new(r"^LOGIN ON (\S+) BY (\S+)$").unwrap()),
+        ("FAILED_LOGIN", Regex::new(r"^FAILED LOGIN \d+ (?:FROM (\S+) )?FOR (\S+), (.+)$").unwrap()),
+        ("FAILED_LOGIN_TTY", Regex::new(r"^FAILED LOGIN \d+ ON (\S+) FOR (\S+), (.+)$").unwrap()),
+        ("TOO_MANY_TRIES", Regex::new(r"^TOO MANY LOGIN TRIES \(\d+\) ON (\S+) FOR (\S+)$").unwrap()),
+    ]
+    });
+
+    let mut map = AHashMap::new();
+
+    for (name, regex) in LOGIN_REGEXES.iter() {
+        let mut timestamp = String::new();
+        if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
+            timestamp = tp.to_owned();
+        }
+
+        if let Some(s) = entry_map.get("MESSAGE") {
+            if let Some(msg) = regex.captures(s) {
+                let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                    "AUTH_FAILURE" => (
+                        Some(&[
+                            ("logname", 1),
+                            ("uid", 2),
+                            ("euid", 3),
+                            ("tty", 4),
+                            ("ruser", 5),
+                            ("rhost", 6),
+                        ]),
+                        EventType::AuthFailure,
+                    ),
+
+                    "AUTH_CHECK_PASS" | "AUTH_USER_UNKNOWN" | "FAILL0CK_USER_UNKNOWN" => {
+                        (None, EventType::Info)
+                    }
+
+                    "NOLOGIN_REFUSED" | "ACCOUNT_EXPIRED" => {
+                        (Some(&[("user", 1)]), EventType::Info)
+                    }
+
+                    "SESSION_OPENED" => (
+                        Some(&[("user", 1), ("uid", 2), ("LoginId", 3)]),
+                        EventType::SessionOpened,
+                    ),
+
+                    "SESSION_CLOSED" => (Some(&[("user", 1)]), EventType::SessionClosed),
+
+                    "LOGIN_SUCCESS" => (Some(&[("tty", 1), ("user", 2)]), EventType::Success),
+
+                    "FAILED_LOGIN" | "FAILED_LOGIN_TTY" => (
+                        Some(&[("tries", 2), ("tty", 1), ("user", 3)]),
+                        EventType::Failure,
+                    ),
+
+                    "TOO_MANY_TRIES" => (
+                        Some(&[("tries", 1), ("tty", 2), ("user", 3)]),
+                        EventType::TooManyAuthFailures,
+                    ),
+
+                    _ => (None, EventType::Other),
+                };
+
+                if let Some(fields) = data {
+                    for &(name, idx) in fields {
+                        if let Some(m) = msg.get(idx) {
+                            map.insert(name.to_string(), m.as_str().to_string());
+                        }
+                    }
+                }
+                return Some(EventData {
+                    timestamp,
+                    service: Service::Login,
+                    data: map,
+                    event_type,
+                    raw_msg: s.clone(),
+                });
+            }
+        }
+    }
+    None
+}
+pub fn parse_kernel_events(map: Entry) -> Option<EventData> {
+    todo!()
+}
+pub fn parse_user_change_events(map: Entry) -> Option<EventData> {
+    todo!()
+}
+
+pub fn parse_pkg_events(map: Entry) -> Option<EventData> {
+    todo!()
+}
+
+pub fn parse_config_change_events(map: Entry) -> Option<EventData> {
+    todo!()
+}
+pub fn parse_network_events(map: Entry) -> Option<EventData> {
+    todo!()
 }
 
 // fn parse_kernel_events()
@@ -526,7 +462,7 @@ pub fn flush_previous_data(
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_sudo_login_attempts(data) {
                             match ev.event_type {
-                                EventType::Info => {
+                                EventType::AuthError => {
                                     println!("{:?}", ev);
                                 }
                                 _ => {}
@@ -537,9 +473,10 @@ pub fn flush_previous_data(
 
                 "login.events" => {
                     s.match_add("_COMM", "login")?;
-                    s.match_add("_SYSTEMD_UNIT", "systemd-logind.service")?;
                     while let Some(data) = s.next_entry()? {
-                        println!("{:?}", data);
+                        if let Some(ev) = parse_login_attempts(data) {
+                            println!("{:?}", ev);
+                        }
                     }
                 }
 
