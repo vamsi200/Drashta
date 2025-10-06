@@ -16,6 +16,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::TryRecvError;
 use futures::{Stream, stream};
 use serde::Deserialize;
+use serde_json::{json, to_string};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -74,7 +75,7 @@ pub async fn drain_data_upto_n(
 
     let stream = BroadcastStream::new(rx).filter_map(|res| async move {
         res.ok()
-            .map(|msg| Ok(Event::default().event("test").data(format!("{:?}", msg))))
+            .map(|msg| Ok(Event::default().data(format!("{:?}", msg))))
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -95,36 +96,51 @@ pub async fn drain_backlog(
     assert!(!rx.is_closed());
     //calling the Sender
     tokio::task::spawn_blocking(move || {
-        println!("Flushing Events");
+        println!("Flushing Events - {:?}", Some(journal_units.clone()));
         if let Err(e) = flush_previous_data(tx, Some(journal_units)) {
             eprintln!("Error: {:?}", e);
         }
     });
     let stream = BroadcastStream::new(rx).filter_map(|res| async move {
-        res.ok()
-            .map(|msg| Ok(Event::default().event("test").data(format!("{:?}", msg))))
+        match res {
+            Ok(msg) => {
+                let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
+                Some(Ok(Event::default().data(format!("{}\n\n", json))))
+            }
+            Err(_) => None,
+        }
     });
-
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 pub async fn receive_data(
-    State(tx): State<tokio::sync::broadcast::Sender<Entry>>,
+    State(tx): State<tokio::sync::broadcast::Sender<EventData>>,
+    filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let rx = tx.clone().subscribe();
-    let journal_units = Journalunits::new();
+    let mut journal_units = Journalunits::new();
+
+    match filter_event.0.event_name {
+        Some(event) => journal_units.push(event),
+        None => journal_units.clear(),
+    }
 
     std::thread::spawn(move || {
         println!("Getting Live Events");
 
-        if let Err(e) = read_journal_logs(tx, journal_units) {
+        if let Err(e) = read_journal_logs(tx, Some(journal_units)) {
             eprintln!("Error: {:?}", e);
         }
     });
 
     let stream = BroadcastStream::new(rx).filter_map(|res| async move {
-        res.ok()
-            .map(|msg| Ok(Event::default().event("test").data(format!("{:?}", msg))))
+        match res {
+            Ok(msg) => {
+                let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
+                Some(Ok(Event::default().data(format!("{}\n\n", json))))
+            }
+            Err(_) => None,
+        }
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())

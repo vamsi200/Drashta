@@ -11,6 +11,7 @@ use axum::extract::State;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -29,7 +30,7 @@ use tokio::sync::broadcast;
 
 pub type Entry = BTreeMap<String, String>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EventData {
     pub timestamp: String,
     pub service: Service,
@@ -38,16 +39,18 @@ pub struct EventData {
     pub raw_msg: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum Service {
     Sshd,
     Sudo,
     Login,
     UserChange,
     PkgManager,
+    ConfigChange,
+    NetworkManager,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum EventType {
     Success,
     Failure,
@@ -73,6 +76,9 @@ pub enum EventType {
     PkgUpgraded,
     PkgReinstalled,
     PkgDowndraded,
+    CmdRun,
+    CronReload,
+    NewConnection,
 }
 
 pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
@@ -630,7 +636,7 @@ pub fn parse_pkg_events(content: String) -> Option<EventData> {
             let timestamp = s.get(1).unwrap().as_str().to_string();
             let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                 "INSTALLED" => (Some(&[("pkg_name", 2)]), EventType::PkgInstalled),
-                "REMOVED" => (Some(&[("pkg_name", 2)]), EventType::PkgInstalled),
+                "REMOVED" => (Some(&[("pkg_name", 2)]), EventType::PkgRemoved),
                 "UPGRADED" => (
                     Some(&[("pkg_name", 2), ("version_from", 3), ("version_to", 4)]),
                     EventType::PkgUpgraded,
@@ -665,10 +671,96 @@ pub fn parse_pkg_events(content: String) -> Option<EventData> {
     None
 }
 
-pub fn parse_config_change_events(map: Entry) -> Option<EventData> {
-    todo!()
+pub fn parse_config_change_events(entry_map: Entry) -> Option<EventData> {
+    static CRON_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
+        vec![
+            (
+                "CRON_CMD",
+                Regex::new(r"^\((\S+)\)\s+CMD\s+\((.+)\)$").unwrap(),
+            ),
+            (
+                "CRON_RELOAD",
+                Regex::new(r"^\((\S+)\)\s+RELOAD\s+\(crontabs/(\S+)\)$").unwrap(),
+            ),
+            (
+                "CRON_ERROR_BAD_COMMAND",
+                Regex::new(r"^\((\S+)\)\s+ERROR\s+\(bad command\)$").unwrap(),
+            ),
+            (
+                "CRON_ERROR_BAD_MINUTE",
+                Regex::new(r"^\((\S+)\)\s+ERROR\s+\(bad minute\)$").unwrap(),
+            ),
+            (
+                "CRON_ERROR_OTHER",
+                Regex::new(r"^\((\S+)\)\s+ERROR\s+\((.+)\)$").unwrap(),
+            ),
+            (
+                "CRON_DENIED",
+                Regex::new(r"^\((\S+)\)\s+AUTH\s+\(crontab denied\)$").unwrap(),
+            ),
+            (
+                "CRON_SESSION_OPEN",
+                Regex::new(
+                    r"^pam_unix\(cron:session\): session opened for user (\S+) by \(uid=(\d+)\)$",
+                )
+                .unwrap(),
+            ),
+            (
+                "CRON_SESSION_CLOSE",
+                Regex::new(r"^pam_unix\(cron:session\): session closed for user (\S+)$").unwrap(),
+            ),
+        ]
+    });
+    let mut map = AHashMap::new();
+    let mut timestamp = String::new();
+    if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
+        timestamp = tp.to_owned();
+    }
+
+    for (name, regex) in CRON_REGEX.iter() {
+        if let Some(s) = entry_map.get("MESSAGE") {
+            if let Some(msg) = regex.captures(s) {
+                let (fields, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                    "CRON_CMD" => (Some(&[("user", 1), ("cron_cmd", 2)]), EventType::CmdRun),
+                    "CRON_RELOAD" => (
+                        Some(&[("user", 1), ("cron_reload", 2)]),
+                        EventType::CronReload,
+                    ),
+                    "CRON_ERROR_BAD_COMMAND" => (Some(&[("user", 1)]), EventType::Info),
+                    "CRON_ERROR_BAD_MINUTE" => (Some(&[("user", 1)]), EventType::Info),
+                    "CRON_ERROR_OTHER" => (Some(&[("user", 1)]), EventType::Info),
+
+                    "CRON_DENIED" => (Some(&[("user", 1)]), EventType::Failure),
+                    "CRON_SESSION_OPEN" => {
+                        (Some(&[("user", 1), ("uid", 2)]), EventType::SessionOpened)
+                    }
+                    "CRON_SESSION_CLOSE" => (Some(&[("user", 1)]), EventType::SessionClosed),
+
+                    _ => (None, EventType::Other),
+                };
+
+                if let Some(data) = fields {
+                    for &(fields, idx) in data {
+                        map.insert(
+                            fields.to_string(),
+                            msg.get(idx).unwrap().as_str().to_string(),
+                        );
+                    }
+                }
+
+                return Some(EventData {
+                    timestamp,
+                    service: Service::ConfigChange,
+                    event_type,
+                    data: map,
+                    raw_msg: s.clone(),
+                });
+            }
+        }
+    }
+    None
 }
-pub fn parse_network_events(map: Entry) -> Option<EventData> {
+pub fn parse_network_events(entry_map: Entry) -> Option<EventData> {
     todo!()
 }
 pub fn parse_firewalld_events(map: Entry) -> Option<EventData> {
@@ -704,11 +796,8 @@ pub fn flush_previous_data(
                     s.match_add("_COMM", "sudo")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_sudo_login_attempts(data) {
-                            match ev.event_type {
-                                EventType::AuthError => {
-                                    println!("{:?}", ev);
-                                }
-                                _ => {}
+                            if let Err(e) = tx.send(ev) {
+                                println!("Dropped");
                             }
                         }
                     }
@@ -718,7 +807,9 @@ pub fn flush_previous_data(
                     s.match_add("_COMM", "login")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_login_attempts(data) {
-                            println!("{:?}", ev);
+                            if let Err(e) = tx.send(ev) {
+                                println!("Dropped");
+                            }
                         }
                     }
                 }
@@ -747,9 +838,13 @@ pub fn flush_previous_data(
                 }
 
                 "network.events" => {
-                    s.match_add("_SYSTEMD_UNIT", "NetworkManger.service")?;
+                    s.match_add("_SYSTEMD_UNIT", "NetworkManager.service")?;
                     while let Some(data) = s.next_entry()? {
-                        println!("{:?}", data);
+                        if let Some(ev) = parse_network_events(data) {
+                            if let Err(e) = tx.send(ev) {
+                                println!("Dropped");
+                            }
+                        }
                     }
                 }
 
@@ -774,13 +869,17 @@ pub fn flush_previous_data(
                 }
 
                 "config.events" => {
-                    s.match_add("_COMM", "sshd-keygen")?;
-                    s.match_add("_COMM", "scp")?; // need to add others maybe?
+                    // s.match_add("_COMM", "sshd-keygen")?;
+                    // s.match_add("_COMM", "scp")?; // need to add others maybe?
                     s.match_add("_SYSTEMD_UNIT", "cronie.service")?;
                     // s.match_add("_SYSTEMD_UNIT", "cron.service")?;
 
                     while let Some(data) = s.next_entry()? {
-                        println!("{:?}", data);
+                        if let Some(ev) = parse_config_change_events(data) {
+                            if let Err(e) = tx.send(ev) {
+                                println!("Dropped");
+                            }
+                        }
                     }
                 }
 
@@ -832,24 +931,30 @@ pub fn flush_upto_n_entries(
 }
 
 pub fn read_journal_logs(
-    tx: tokio::sync::broadcast::Sender<Entry>,
-    unit: Vec<String>,
+    tx: tokio::sync::broadcast::Sender<EventData>,
+    unit: Option<Vec<String>>,
 ) -> Result<()> {
     let mut s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()
         .unwrap();
 
-    for u in unit {
-        s.match_add("_SYSTEMD_UNIT", u)?;
-    }
-
     loop {
-        while let Some(data) = s.await_next_entry(None)? {
-            if let Err(e) = tx.send(data) {
-                println!("Dropped event: {:?}", e);
-            } else {
-                continue;
+        if let Some(ref unit) = unit {
+            for val in unit {
+                match val.as_str() {
+                    "sshd.events" => {
+                        s.match_add("_SYSTEMD_UNIT", "sshd.service")?;
+                        while let Some(data) = s.await_next_entry(None)? {
+                            if let Some(ev) = parse_sshd_logs(data) {
+                                if let Err(e) = tx.send(ev) {
+                                    println!("Dropped");
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         sleep(Duration::from_secs(1));
