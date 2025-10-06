@@ -1,12 +1,7 @@
-const eventSource = new EventSource('http://localhost:3200/drain?event_name=sshd.events');
+import Dashboard from "./test";
 
-export default function EventViewer() {
-  eventSource.onmessage = (event) => {
-    console.log(`Received data: ${event.data}`);
-  };
-
-  eventSource.onerror = (error) => {
-    console.error('EventSource failed:', error);
-  };
+function App() {
+  return <Dashboard />;
 }
 
+export default App;
