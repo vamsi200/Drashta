@@ -5,6 +5,7 @@
 use crate::parser::{
     Entry, EventData, flush_previous_data, flush_upto_n_entries, read_journal_logs,
 };
+use crate::redis::insert_into_db;
 use anyhow::Result;
 use axum::extract::{Query, State};
 use axum::{
@@ -15,6 +16,7 @@ use axum::{
 use futures::StreamExt;
 use futures::channel::mpsc::TryRecvError;
 use futures::{Stream, stream};
+use log::{Level, debug, error, info, log_enabled};
 use serde::Deserialize;
 use serde_json::{json, to_string};
 use std::borrow::Cow;
@@ -23,6 +25,7 @@ use std::convert::Infallible;
 use std::io::Write;
 use std::mem::size_of_val;
 use std::process::exit;
+use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 use std::{collections::BTreeMap, io::BufWriter};
@@ -82,34 +85,28 @@ pub async fn drain_data_upto_n(
 }
 
 pub async fn drain_backlog(
-    State(tx): State<tokio::sync::broadcast::Sender<EventData>>,
     filter_event: Query<FilterEvent>,
-) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    let rx = tx.clone().subscribe();
-    let mut journal_units = Journalunits::new();
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let journal_units = match &filter_event.0.event_name {
+        Some(event) => vec![event.clone()],
+        None => vec![],
+    };
 
-    match filter_event.0.event_name {
-        Some(event) => journal_units.push(event),
-        None => journal_units.clear(),
-    }
+    let mut rx: tokio::sync::mpsc::UnboundedReceiver<EventData> =
+        tokio::task::spawn_blocking(move || {
+            futures::executor::block_on(flush_previous_data(Some(journal_units)))
+                .expect("flush_previous_data failed")
+        })
+        .await
+        .expect("spawn_blocking failed");
 
-    assert!(!rx.is_closed());
-    //calling the Sender
-    tokio::task::spawn_blocking(move || {
-        println!("Flushing Events - {:?}", Some(journal_units.clone()));
-        if let Err(e) = flush_previous_data(tx, Some(journal_units)) {
-            eprintln!("Error: {:?}", e);
+    let stream = async_stream::stream! {
+        while let Some(msg) = rx.recv().await {
+            let json = to_string(&msg).unwrap_or_else(|_|"{}".to_string());
+            yield Ok(Event::default().data(json));
         }
-    });
-    let stream = BroadcastStream::new(rx).filter_map(|res| async move {
-        match res {
-            Ok(msg) => {
-                let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
-                Some(Ok(Event::default().data(format!("{}\n\n", json))))
-            }
-            Err(_) => None,
-        }
-    });
+    };
+
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -137,7 +134,7 @@ pub async fn receive_data(
         match res {
             Ok(msg) => {
                 let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
-                Some(Ok(Event::default().data(format!("{}\n\n", json))))
+                Some(Ok(Event::default().data(json)))
             }
             Err(_) => None,
         }

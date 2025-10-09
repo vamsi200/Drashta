@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 use systemd::{journal::JournalRef, *};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 pub type Entry = BTreeMap<String, String>;
 
@@ -230,7 +230,7 @@ pub fn parse_sudo_login_attempts(entry_map: Entry) -> Option<EventData> {
         if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
             timestamp = tp.to_owned();
         }
-        let trim_msg = s.trim_start();
+        let trim_msg = s.trim();
 
         for (name, regex) in SUDO_REGEX.iter() {
             if let Some(msg) = regex.captures(trim_msg) {
@@ -254,15 +254,8 @@ pub fn parse_sudo_login_attempts(entry_map: Entry) -> Option<EventData> {
                         }
                     }
                 }
-                return Some(EventData {
-                    timestamp,
-                    service: Service::Sudo,
-                    data: map,
-                    event_type,
-                    raw_msg: s.clone(),
-                });
             }
-            if let Some(msg) = regex.captures(s) {
+            if let Some(msg) = regex.captures(trim_msg) {
                 let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                     "SESSION_OPENED_SU" => (
                         Some(&[
@@ -714,12 +707,13 @@ pub fn parse_config_change_events(entry_map: Entry) -> Option<EventData> {
     let mut map = AHashMap::new();
     let mut timestamp = String::new();
     if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
-        timestamp = tp.to_owned();
+        timestamp = tp.trim().to_owned();
     }
 
     for (name, regex) in CRON_REGEX.iter() {
         if let Some(s) = entry_map.get("MESSAGE") {
-            if let Some(msg) = regex.captures(s) {
+            let trimmed_msg = s.trim();
+            if let Some(msg) = regex.captures(trimmed_msg) {
                 let (fields, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                     "CRON_CMD" => (Some(&[("user", 1), ("cron_cmd", 2)]), EventType::CmdRun),
                     "CRON_RELOAD" => (
@@ -769,13 +763,14 @@ pub fn parse_firewalld_events(map: Entry) -> Option<EventData> {
 
 // Should also think to capture command failures
 //TODO: Need to check the name's of the services beacuse there are different on different distros
-pub fn flush_previous_data(
-    tx: tokio::sync::broadcast::Sender<EventData>,
+pub async fn flush_previous_data(
     unit: Option<Vec<String>>,
-) -> Result<()> {
+) -> Result<mpsc::UnboundedReceiver<EventData>> {
     let mut s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()?;
+
+    let (tx, rx) = mpsc::unbounded_channel::<EventData>();
 
     if let Some(unit) = unit {
         for val in unit {
@@ -784,7 +779,7 @@ pub fn flush_previous_data(
                     s.match_add("_SYSTEMD_UNIT", "sshd.service")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_sshd_logs(data) {
-                            if let Err(e) = tx.send(ev) {
+                            if tx.send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -796,7 +791,7 @@ pub fn flush_previous_data(
                     s.match_add("_COMM", "sudo")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_sudo_login_attempts(data) {
-                            if let Err(e) = tx.send(ev) {
+                            if tx.send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -807,14 +802,14 @@ pub fn flush_previous_data(
                     s.match_add("_COMM", "login")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_login_attempts(data) {
-                            if let Err(e) = tx.send(ev) {
+                            if tx.send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
                     }
                 }
 
-                "pkg.events" => {
+                "pkgmanager.events" => {
                     //TODO: Have to use inotify or use sleep to read live events
                     let file_name = PathBuf::from("/var/log/pacman.log");
                     let file = File::open(file_name).unwrap();
@@ -823,7 +818,7 @@ pub fn flush_previous_data(
                     for line in reader.lines() {
                         let line = line.unwrap_or(String::new());
                         if let Some(ev) = parse_pkg_events(line) {
-                            if let Err(e) = tx.send(ev) {
+                            if tx.send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -841,7 +836,7 @@ pub fn flush_previous_data(
                     s.match_add("_SYSTEMD_UNIT", "NetworkManager.service")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_network_events(data) {
-                            if let Err(e) = tx.send(ev) {
+                            if tx.send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -861,14 +856,14 @@ pub fn flush_previous_data(
                     s.match_add("_COMM", "passwd")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_user_change_events(data) {
-                            if let Err(e) = tx.send(ev) {
+                            if tx.send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
                     }
                 }
 
-                "config.events" => {
+                "configchange.events" => {
                     // s.match_add("_COMM", "sshd-keygen")?;
                     // s.match_add("_COMM", "scp")?; // need to add others maybe?
                     s.match_add("_SYSTEMD_UNIT", "cronie.service")?;
@@ -876,7 +871,7 @@ pub fn flush_previous_data(
 
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_config_change_events(data) {
-                            if let Err(e) = tx.send(ev) {
+                            if tx.send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -898,7 +893,7 @@ pub fn flush_previous_data(
         // }
     }
 
-    Ok(())
+    Ok(rx)
 }
 
 pub fn flush_upto_n_entries(
