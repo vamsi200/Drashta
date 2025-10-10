@@ -8,6 +8,7 @@ use ahash::AHashMap;
 use aho_corasick::AhoCorasick;
 use anyhow::Result;
 use axum::extract::State;
+use log::info;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -763,23 +764,23 @@ pub fn parse_firewalld_events(map: Entry) -> Option<EventData> {
 
 // Should also think to capture command failures
 //TODO: Need to check the name's of the services beacuse there are different on different distros
-pub async fn flush_previous_data(
+pub fn flush_previous_data(
+    tx: tokio::sync::mpsc::Sender<EventData>,
     unit: Option<Vec<String>>,
-) -> Result<mpsc::UnboundedReceiver<EventData>> {
+) -> Result<()> {
     let mut s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()?;
-
-    let (tx, rx) = mpsc::unbounded_channel::<EventData>();
 
     if let Some(unit) = unit {
         for val in unit {
             match val.as_str() {
                 "sshd.events" => {
                     s.match_add("_SYSTEMD_UNIT", "sshd.service")?;
+                    info!("Called sshd.events");
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_sshd_logs(data) {
-                            if tx.send(ev).is_err() {
+                            if tx.blocking_send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -789,9 +790,10 @@ pub async fn flush_previous_data(
                 "sudo.events" => {
                     s.match_add("_COMM", "su")?;
                     s.match_add("_COMM", "sudo")?;
+                    info!("Called sudo.events");
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_sudo_login_attempts(data) {
-                            if tx.send(ev).is_err() {
+                            if tx.blocking_send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -800,9 +802,10 @@ pub async fn flush_previous_data(
 
                 "login.events" => {
                     s.match_add("_COMM", "login")?;
+                    info!("Called login.events");
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_login_attempts(data) {
-                            if tx.send(ev).is_err() {
+                            if tx.blocking_send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -815,10 +818,11 @@ pub async fn flush_previous_data(
                     let file = File::open(file_name).unwrap();
                     let reader = BufReader::new(file);
 
+                    info!("Called pkgmanager.events");
                     for line in reader.lines() {
                         let line = line.unwrap_or(String::new());
                         if let Some(ev) = parse_pkg_events(line) {
-                            if tx.send(ev).is_err() {
+                            if tx.blocking_send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -826,6 +830,7 @@ pub async fn flush_previous_data(
                 }
 
                 "firewall.events" => {
+                    info!("Called firewall.events");
                     s.match_add("_SYSTEMD_UNIT", "firewalld.service")?;
                     while let Some(data) = s.next_entry()? {
                         println!("{:?}", data);
@@ -833,10 +838,12 @@ pub async fn flush_previous_data(
                 }
 
                 "network.events" => {
+                    info!("Called networkmanager.events");
+
                     s.match_add("_SYSTEMD_UNIT", "NetworkManager.service")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_network_events(data) {
-                            if tx.send(ev).is_err() {
+                            if tx.blocking_send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -844,6 +851,7 @@ pub async fn flush_previous_data(
                 }
 
                 "kernel.events" => {
+                    info!("Called kernel.events");
                     s.match_add("_TRANSPORT", "kernel")?;
                     while let Some(data) = s.next_entry()? {
                         parse_kernel_events(data);
@@ -851,12 +859,13 @@ pub async fn flush_previous_data(
                 }
 
                 "userchange.events" => {
+                    info!("Called userchange.events");
                     s.match_add("_COMM", "useradd")?;
                     s.match_add("_COMM", "groupadd")?;
                     s.match_add("_COMM", "passwd")?;
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_user_change_events(data) {
-                            if tx.send(ev).is_err() {
+                            if tx.blocking_send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -864,6 +873,7 @@ pub async fn flush_previous_data(
                 }
 
                 "configchange.events" => {
+                    info!("Called configchange.events");
                     // s.match_add("_COMM", "sshd-keygen")?;
                     // s.match_add("_COMM", "scp")?; // need to add others maybe?
                     s.match_add("_SYSTEMD_UNIT", "cronie.service")?;
@@ -871,7 +881,7 @@ pub async fn flush_previous_data(
 
                     while let Some(data) = s.next_entry()? {
                         if let Some(ev) = parse_config_change_events(data) {
-                            if tx.send(ev).is_err() {
+                            if tx.blocking_send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
@@ -893,7 +903,7 @@ pub async fn flush_previous_data(
         // }
     }
 
-    Ok(rx)
+    Ok(())
 }
 
 pub fn flush_upto_n_entries(

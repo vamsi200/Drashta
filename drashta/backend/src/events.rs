@@ -14,7 +14,6 @@ use axum::{
     routing::get,
 };
 use futures::StreamExt;
-use futures::channel::mpsc::TryRecvError;
 use futures::{Stream, stream};
 use log::{Level, debug, error, info, log_enabled};
 use serde::Deserialize;
@@ -26,11 +25,11 @@ use std::io::Write;
 use std::mem::size_of_val;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
-use std::thread::sleep;
+use std::thread::{sleep, spawn};
 use std::time::Duration;
 use std::{collections::BTreeMap, io::BufWriter};
 use tokio::sync::broadcast::Sender;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{self, Receiver};
 use tokio::task::{spawn_blocking, yield_now};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
@@ -86,23 +85,21 @@ pub async fn drain_data_upto_n(
 
 pub async fn drain_backlog(
     filter_event: Query<FilterEvent>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let journal_units = match &filter_event.0.event_name {
-        Some(event) => vec![event.clone()],
-        None => vec![],
-    };
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, mut rx) = mpsc::channel::<EventData>(1024);
+    let mut journal_units = Journalunits::new();
 
-    let mut rx: tokio::sync::mpsc::UnboundedReceiver<EventData> =
-        tokio::task::spawn_blocking(move || {
-            futures::executor::block_on(flush_previous_data(Some(journal_units)))
-                .expect("flush_previous_data failed")
-        })
-        .await
-        .expect("spawn_blocking failed");
+    match filter_event.0.event_name {
+        Some(event) => journal_units.push(event),
+        None => journal_units.clear(),
+    }
 
+    tokio::task::spawn_blocking(move || {
+        flush_previous_data(tx, Some(journal_units)).unwrap();
+    });
     let stream = async_stream::stream! {
         while let Some(msg) = rx.recv().await {
-            let json = to_string(&msg).unwrap_or_else(|_|"{}".to_string());
+            let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
             yield Ok(Event::default().data(json));
         }
     };
