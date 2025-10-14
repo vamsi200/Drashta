@@ -3,9 +3,8 @@
 #![allow(unused_imports)]
 
 use crate::parser::{
-    Entry, EventData, flush_previous_data, flush_upto_n_entries, read_journal_logs,
+    Entry, EventData, flush_upto_n_entries, handle_service_event, read_journal_logs,
 };
-use crate::redis::insert_into_db;
 use anyhow::Result;
 use axum::extract::{Query, State};
 use axum::{
@@ -71,13 +70,13 @@ pub async fn drain_data_upto_n(
     tokio::task::spawn_blocking(move || {
         println!("Flushing Events upto - {n}");
         if let Err(e) = flush_upto_n_entries(tx, journal_units, n) {
-            eprintln!("Error: {:?}", e);
+            eprintln!("Error: {e}");
         }
     });
 
     let stream = BroadcastStream::new(rx).filter_map(|res| async move {
         res.ok()
-            .map(|msg| Ok(Event::default().data(format!("{:?}", msg))))
+            .map(|msg| Ok(Event::default().data(format!("{msg:?}"))))
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -95,7 +94,12 @@ pub async fn drain_backlog(
     }
 
     tokio::task::spawn_blocking(move || {
-        flush_previous_data(tx, Some(journal_units)).unwrap();
+        let tx = tx;
+        for ev in journal_units {
+            if let Err(e) = handle_service_event(&ev, tx.clone()) {
+                error!("{e}");
+            }
+        }
     });
     let stream = async_stream::stream! {
         while let Some(msg) = rx.recv().await {
@@ -118,12 +122,12 @@ pub async fn receive_data(
         Some(event) => journal_units.push(event),
         None => journal_units.clear(),
     }
+    let local = tokio::task::LocalSet::new();
 
+    println!("Getting Live Events");
     std::thread::spawn(move || {
-        println!("Getting Live Events");
-
         if let Err(e) = read_journal_logs(tx, Some(journal_units)) {
-            eprintln!("Error: {:?}", e);
+            eprintln!("Error: {e}");
         }
     });
 
@@ -133,7 +137,10 @@ pub async fn receive_data(
                 let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
                 Some(Ok(Event::default().data(json)))
             }
-            Err(_) => None,
+            Err(e) => {
+                info!("Event Dropped!");
+                Some(Ok(Event::default()))
+            } // Err(_) => None,
         }
     });
 

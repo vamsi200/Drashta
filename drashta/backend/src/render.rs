@@ -8,7 +8,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 pub async fn render_app(tx: tokio::sync::broadcast::Sender<EventData>) {
     let addr = "0.0.0.0:3200";
-    println!("Started Listening at - {}", addr);
+    println!("Started Listening at - {addr}");
 
     // let app = Router::new()
     //     // .route("/events", get(receive_data))

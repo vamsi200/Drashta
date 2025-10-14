@@ -33,13 +33,20 @@ use tokio::sync::{broadcast, mpsc};
 
 pub type Entry = BTreeMap<String, String>;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type", content = "value")]
+pub enum RawMsgType {
+    Structured(BTreeMap<String, String>),
+    Plain(String),
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EventData {
     pub timestamp: String,
     pub service: Service,
     pub event_type: EventType,
     pub data: AHashMap<String, String>,
-    pub raw_msg: String,
+    pub raw_msg: RawMsgType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -84,8 +91,11 @@ pub enum EventType {
     NewConnection,
 }
 
-pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
-    msg.get(i).map(|m| m.as_str().to_string())
+type ParserFn = fn(entry_map: Entry) -> Option<EventData>;
+
+pub struct ServiceConfig {
+    matches: Vec<(&'static str, &'static str)>,
+    parser: ParserFn,
 }
 
 macro_rules! insert_fields {
@@ -94,6 +104,21 @@ macro_rules! insert_fields {
             $map.insert($key.to_string(), rg_capture(&$msg, $idx)?);
         )+
     };
+}
+
+macro_rules! handle_services {
+    ($service_name:expr, $tx:expr, $($service:expr),* $(,)?) => {
+        match $service_name {
+            $(
+                $service => process_service_logs($service, $tx)?,
+            )*
+            _ => {}
+        }
+    };
+}
+
+pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
+    msg.get(i).map(|m| m.as_str().to_string())
 }
 
 pub fn parse_sshd_logs(entry_map: Entry) -> Option<EventData> {
@@ -185,7 +210,7 @@ pub fn parse_sshd_logs(entry_map: Entry) -> Option<EventData> {
                     service: Service::Sshd,
                     data: map,
                     event_type,
-                    raw_msg: s.clone(),
+                    raw_msg: RawMsgType::Structured(entry_map),
                 });
             }
         }
@@ -202,9 +227,8 @@ pub fn parse_sshd_logs(entry_map: Entry) -> Option<EventData> {
                     service: Service::Sshd,
                     data: map,
                     event_type: EventType::Info,
-                    raw_msg: s.clone(),
+                    raw_msg: RawMsgType::Structured(entry_map),
                 };
-
                 return Some(ev);
             }
         }
@@ -333,7 +357,7 @@ pub fn parse_sudo_login_attempts(entry_map: Entry) -> Option<EventData> {
                     service: Service::Sudo,
                     data: map,
                     event_type,
-                    raw_msg: s.clone(),
+                    raw_msg: RawMsgType::Structured(entry_map),
                 });
             }
         }
@@ -425,7 +449,7 @@ pub fn parse_login_attempts(entry_map: Entry) -> Option<EventData> {
                     service: Service::Login,
                     data: map,
                     event_type,
-                    raw_msg: s.clone(),
+                    raw_msg: RawMsgType::Structured(entry_map),
                 });
             }
         }
@@ -528,7 +552,7 @@ pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
                     service: Service::UserChange,
                     event_type,
                     data: map,
-                    raw_msg: msg.clone(),
+                    raw_msg: RawMsgType::Structured(entry_map),
                 });
             }
             for (name, regex) in USER_DELETION_REGEX.iter() {
@@ -563,7 +587,7 @@ pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
                         service: Service::UserChange,
                         event_type,
                         data: map,
-                        raw_msg: msg.clone(),
+                        raw_msg: RawMsgType::Structured(entry_map),
                     });
                 }
             }
@@ -591,7 +615,7 @@ pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
                         service: Service::UserChange,
                         event_type,
                         data: map,
-                        raw_msg: msg.clone(),
+                        raw_msg: RawMsgType::Structured(entry_map),
                     });
                 }
             }
@@ -660,7 +684,7 @@ pub fn parse_pkg_events(content: String) -> Option<EventData> {
                 service: Service::PkgManager,
                 event_type,
                 data: map,
-                raw_msg: content,
+                raw_msg: RawMsgType::Plain(content),
             });
         }
     }
@@ -750,7 +774,7 @@ pub fn parse_config_change_events(entry_map: Entry) -> Option<EventData> {
                     service: Service::ConfigChange,
                     event_type,
                     data: map,
-                    raw_msg: s.clone(),
+                    raw_msg: RawMsgType::Structured(entry_map),
                 });
             }
         }
@@ -764,147 +788,141 @@ pub fn parse_firewalld_events(map: Entry) -> Option<EventData> {
     todo!()
 }
 
-// Should also think to capture command failures
-//TODO: Need to check the name's of the services beacuse there are different on different distros
-pub fn flush_previous_data(
+pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
+    let mut map = AHashMap::new();
+
+    map.insert(
+        "sshd.events",
+        ServiceConfig {
+            matches: vec![
+                ("_COMM", "sshd"),
+                ("_EXE", "/usr/sbin/sshd"),
+                ("_SYSTEMD_UNIT", "sshd.service"),
+            ],
+            parser: parse_sshd_logs,
+        },
+    );
+
+    map.insert(
+        "sudo.events",
+        ServiceConfig {
+            matches: vec![("_COMM", "su"), ("_COMM", "sudo")],
+            parser: parse_sudo_login_attempts,
+        },
+    );
+
+    map.insert(
+        "login.events",
+        ServiceConfig {
+            matches: vec![("_COMM", "login")],
+            parser: parse_login_attempts,
+        },
+    );
+
+    map.insert(
+        "firewall.events",
+        ServiceConfig {
+            matches: vec![("_SYSTEMD_UNIT", "firewalld.service")],
+            parser: |_d| None, // TODO
+        },
+    );
+
+    map.insert(
+        "network.events",
+        ServiceConfig {
+            matches: vec![("_SYSTEMD_UNIT", "NetworkManager.service")],
+            parser: parse_network_events,
+        },
+    );
+
+    map.insert(
+        "kernel.events",
+        ServiceConfig {
+            matches: vec![("_TRANSPORT", "kernel")],
+            parser: parse_kernel_events,
+        },
+    );
+
+    map.insert(
+        "userchange.events",
+        ServiceConfig {
+            matches: vec![
+                ("_COMM", "useradd"),
+                ("_COMM", "groupadd"),
+                ("_COMM", "passwd"),
+            ],
+            parser: parse_user_change_events,
+        },
+    );
+
+    map.insert(
+        "configchange.events",
+        ServiceConfig {
+            matches: vec![("_SYSTEMD_UNIT", "cronie.service")],
+            parser: parse_config_change_events,
+        },
+    );
+
+    map
+}
+
+//TODO: Include the live part here as well
+pub fn process_service_logs(
+    service_name: &str,
     tx: tokio::sync::mpsc::Sender<EventData>,
-    unit: Option<Vec<String>>,
 ) -> Result<()> {
+    let configs = get_service_configs();
+
+    let Some(config) = configs.get(service_name) else {
+        anyhow::bail!("Unknown service: {}", service_name);
+    };
+
     let mut s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()?;
 
-    if let Some(unit) = unit {
-        for val in unit {
-            match val.as_str() {
-                "sshd.events" => {
-                    s.match_add("_SYSTEMD_UNIT", "sshd.service")?;
-                    info!("Called sshd.events");
-                    while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_sshd_logs(data) {
-                            if tx.blocking_send(ev).is_err() {
-                                println!("Dropped");
-                            }
-                        }
-                    }
-                }
-
-                "sudo.events" => {
-                    s.match_add("_COMM", "su")?;
-                    s.match_add("_COMM", "sudo")?;
-                    info!("Called sudo.events");
-                    while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_sudo_login_attempts(data) {
-                            if tx.blocking_send(ev).is_err() {
-                                println!("Dropped");
-                            }
-                        }
-                    }
-                }
-
-                "login.events" => {
-                    s.match_add("_COMM", "login")?;
-                    info!("Called login.events");
-                    while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_login_attempts(data) {
-                            if tx.blocking_send(ev).is_err() {
-                                println!("Dropped");
-                            }
-                        }
-                    }
-                }
-
-                "pkgmanager.events" => {
-                    //TODO: Have to use inotify or use sleep to read live events
-                    let file_name = PathBuf::from("/var/log/pacman.log");
-                    let file = File::open(file_name).unwrap();
-                    let mut reader = BufReader::with_capacity(128 * 1024, file);
-                    info!("Called pkgmanager.events");
-                    let mut buf = String::new();
-                    while reader.read_line(&mut buf).unwrap() > 0 {
-                        if let Some(ev) = parse_pkg_events(buf.trim_end().to_string()) {
-                            if tx.blocking_send(ev).is_err() {
-                                println!("Dropped");
-                            }
-                        }
-                        buf.clear();
-                    }
-                }
-
-                "firewall.events" => {
-                    info!("Called firewall.events");
-                    s.match_add("_SYSTEMD_UNIT", "firewalld.service")?;
-                    while let Some(data) = s.next_entry()? {
-                        println!("{data:?}");
-                    }
-                }
-
-                "network.events" => {
-                    info!("Called networkmanager.events");
-
-                    s.match_add("_SYSTEMD_UNIT", "NetworkManager.service")?;
-                    while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_network_events(data) {
-                            if tx.blocking_send(ev).is_err() {
-                                println!("Dropped");
-                            }
-                        }
-                    }
-                }
-
-                "kernel.events" => {
-                    info!("Called kernel.events");
-                    s.match_add("_TRANSPORT", "kernel")?;
-                    while let Some(data) = s.next_entry()? {
-                        parse_kernel_events(data);
-                    }
-                }
-
-                "userchange.events" => {
-                    info!("Called userchange.events");
-                    s.match_add("_COMM", "useradd")?;
-                    s.match_add("_COMM", "groupadd")?;
-                    s.match_add("_COMM", "passwd")?;
-                    while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_user_change_events(data) {
-                            if tx.blocking_send(ev).is_err() {
-                                println!("Dropped");
-                            }
-                        }
-                    }
-                }
-
-                "configchange.events" => {
-                    info!("Called configchange.events");
-                    // s.match_add("_COMM", "sshd-keygen")?;
-                    // s.match_add("_COMM", "scp")?; // need to add others maybe?
-                    s.match_add("_SYSTEMD_UNIT", "cronie.service")?;
-                    // s.match_add("_SYSTEMD_UNIT", "cron.service")?;
-
-                    while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_config_change_events(data) {
-                            if tx.blocking_send(ev).is_err() {
-                                println!("Dropped");
-                            }
-                        }
-                    }
-                }
-
-                "all.events" => {
-                    todo!()
-                }
-                _ => {}
-            }
-        }
-    } else {
-        // while let Some(data) = s.next_entry()? {
-        //     parse_login_attempts(data);
-        //     // if let Err(e) = tx.send(s) {
-        //     //     println!("Dropped");
-        //     // }
-        // }
+    for (field, value) in &config.matches {
+        s.match_add(field, value.to_string())?;
+        s.match_or()?;
     }
 
+    // let now = std::time::SystemTime::now()
+    //     .duration_since(std::time::UNIX_EPOCH)?
+    //     .as_micros() as u64;
+    //
+    // // s.seek_realtime_usec(now)?;
+
+    info!("Draining {} events..", service_name);
+
+    while let Some(data) = s.next_entry()? {
+        if let Some(ev) = (config.parser)(data) {
+            if tx.blocking_send(ev).is_err() {
+                println!("Dropped");
+            }
+        }
+    }
+    Ok(())
+}
+
+// Should also think to capture command failures
+//TODO: Need to check the name's of the services beacuse there are different on different distros
+pub fn handle_service_event(
+    service_name: &str,
+    tx: tokio::sync::mpsc::Sender<EventData>,
+) -> Result<()> {
+    handle_services!(
+        service_name,
+        tx,
+        "sshd.events",
+        "sudo.events",
+        "login.events",
+        "firewall.events",
+        "network.events",
+        "kernel.events",
+        "userchange.events",
+        "configchange.events",
+        "pkgmanager.events",
+    );
     Ok(())
 }
 
