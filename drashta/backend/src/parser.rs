@@ -19,6 +19,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::result::Result::Ok;
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
@@ -27,6 +28,7 @@ use std::{
     time::Duration,
 };
 use systemd::{journal::JournalRef, *};
+use tokio::io::unix::AsyncFd;
 use tokio::sync::{broadcast, mpsc};
 
 pub type Entry = BTreeMap<String, String>;
@@ -196,7 +198,7 @@ pub fn parse_sshd_logs(entry_map: Entry) -> Option<EventData> {
                 });
 
                 let ev = EventData {
-                    timestamp: timestamp,
+                    timestamp,
                     service: Service::Sshd,
                     data: map,
                     event_type: EventType::Info,
@@ -816,16 +818,16 @@ pub fn flush_previous_data(
                     //TODO: Have to use inotify or use sleep to read live events
                     let file_name = PathBuf::from("/var/log/pacman.log");
                     let file = File::open(file_name).unwrap();
-                    let reader = BufReader::new(file);
-
+                    let mut reader = BufReader::with_capacity(128 * 1024, file);
                     info!("Called pkgmanager.events");
-                    for line in reader.lines() {
-                        let line = line.unwrap_or(String::new());
-                        if let Some(ev) = parse_pkg_events(line) {
+                    let mut buf = String::new();
+                    while reader.read_line(&mut buf).unwrap() > 0 {
+                        if let Some(ev) = parse_pkg_events(buf.trim_end().to_string()) {
                             if tx.blocking_send(ev).is_err() {
                                 println!("Dropped");
                             }
                         }
+                        buf.clear();
                     }
                 }
 
@@ -833,7 +835,7 @@ pub fn flush_previous_data(
                     info!("Called firewall.events");
                     s.match_add("_SYSTEMD_UNIT", "firewalld.service")?;
                     while let Some(data) = s.next_entry()? {
-                        println!("{:?}", data);
+                        println!("{data:?}");
                     }
                 }
 
@@ -925,7 +927,7 @@ pub fn flush_upto_n_entries(
     while let Some(data) = s.previous_entry()? {
         count += 1;
         if let Err(e) = tx.send(data) {
-            println!("Dropped event: {:?}", e);
+            println!("Dropped event: {e:?}");
         }
         if count == n {
             break;
@@ -944,24 +946,35 @@ pub fn read_journal_logs(
         .open()
         .unwrap();
 
-    loop {
-        if let Some(ref unit) = unit {
-            for val in unit {
-                match val.as_str() {
-                    "sshd.events" => {
-                        s.match_add("_SYSTEMD_UNIT", "sshd.service")?;
-                        while let Some(data) = s.await_next_entry(None)? {
-                            if let Some(ev) = parse_sshd_logs(data) {
-                                if let Err(e) = tx.send(ev) {
-                                    println!("Dropped");
-                                }
-                            }
+    if let Some(ref unit) = unit {
+        for val in unit {
+            if val == "sshd.events" {
+                s.match_add("_COMM", "sshd-session")?;
+                s.match_or()?;
+                s.match_add("_COMM", "sshd")?;
+                s.match_or()?;
+                s.match_add("_EXE", "/usr/sbin/sshd")?;
+                s.match_or()?;
+                s.match_add("_SYSTEMD_UNIT", "sshd@.service")?;
+
+                info!("Watching sshd live events...");
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_micros() as u64;
+
+                s.seek_realtime_usec(now)?;
+                loop {
+                    while let Some(data) = s.next_entry()? {
+                        if let Some(ev) = parse_sshd_logs(data) {
+                            let _ = tx.send(ev);
                         }
                     }
-                    _ => {}
+                    sleep(Duration::from_secs(1));
                 }
             }
         }
-        sleep(Duration::from_secs(1));
     }
+
+    Ok(())
 }
