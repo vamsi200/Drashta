@@ -107,14 +107,24 @@ macro_rules! insert_fields {
 }
 
 macro_rules! handle_services {
-    ($service_name:expr, $tx:expr, $($service:expr),* $(,)?) => {
-        match $service_name {
-            $(
-                $service => process_service_logs($service, $tx)?,
-            )*
-            _ => {}
-        }
-    };
+    ($service_name:expr, $tx:expr, $cursor:expr, $limit:expr, $($service:expr),* $(,)?) => {{
+        let result: Result<String, anyhow::Error> = if let Some(cursor_val) = $cursor.clone() {
+            match $service_name {
+                $(
+                    $service => process_service_logs($service, $tx.clone(), Some(cursor_val.clone()), $limit),
+                )*
+                _ => Ok(String::new()),
+            }
+        } else {
+            match $service_name {
+                $(
+                    $service => process_service_logs($service, $tx.clone(), None, $limit),
+                )*
+                _ => Ok(String::new()),
+            }
+        };
+        result
+    }};
 }
 
 pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
@@ -866,42 +876,91 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
     map
 }
 
+pub fn process_upto_n_entries(
+    mut journal: Journal,
+    tx: tokio::sync::mpsc::Sender<EventData>,
+    unit: &str,
+    limit: i32,
+    config: &ServiceConfig,
+) -> Result<String> {
+    for (field, value) in &config.matches {
+        journal.match_add(field, value.to_string())?;
+        journal.match_or()?;
+    }
+
+    journal.seek_head()?;
+    let mut count = 0;
+    while count < limit {
+        if let Some(data) = journal.next_entry()? {
+            if let Some(ev) = (config.parser)(data) {
+                if tx.blocking_send(ev).is_err() {
+                    info!("Event Dropped!");
+                }
+                count += 1;
+            }
+        } else {
+            break;
+        }
+    }
+
+    let cursor = journal.cursor()?;
+    Ok(cursor)
+}
+pub fn process_older_logs(
+    mut journal: Journal,
+    tx: tokio::sync::mpsc::Sender<EventData>,
+    limit: i32,
+    config: &ServiceConfig,
+    cursor: String,
+) -> Result<String> {
+    for (field, value) in &config.matches {
+        journal.match_add(field, value.to_string())?;
+        journal.match_or()?;
+    }
+
+    journal.seek_cursor(&cursor)?;
+    let mut count = 0;
+
+    while count < limit {
+        if let Some(data) = journal.next_entry()? {
+            if let Some(ev) = (config.parser)(data) {
+                if tx.blocking_send(ev).is_err() {
+                    info!("Event Dropped!");
+                }
+                count += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    let cursor = journal.cursor()?;
+    Ok(cursor)
+}
+
 //TODO: Include the live part here as well
+//Add the PkgManager impl
 pub fn process_service_logs(
     service_name: &str,
     tx: tokio::sync::mpsc::Sender<EventData>,
-) -> Result<()> {
+    cursor: Option<String>,
+    limit: i32,
+) -> Result<String> {
     let configs = get_service_configs();
 
     let Some(config) = configs.get(service_name) else {
         anyhow::bail!("Unknown service: {}", service_name);
     };
 
-    let mut s: Journal = journal::OpenOptions::default()
+    let s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()?;
 
-    for (field, value) in &config.matches {
-        s.match_add(field, value.to_string())?;
-        s.match_or()?;
-    }
+    let new_cursor = match cursor {
+        Some(cursor) => process_older_logs(s, tx, limit, config, cursor)?,
+        None => process_upto_n_entries(s, tx, "sshd.service", limit, config)?,
+    };
 
-    // let now = std::time::SystemTime::now()
-    //     .duration_since(std::time::UNIX_EPOCH)?
-    //     .as_micros() as u64;
-    //
-    // // s.seek_realtime_usec(now)?;
-
-    info!("Draining {} events..", service_name);
-
-    while let Some(data) = s.next_entry()? {
-        if let Some(ev) = (config.parser)(data) {
-            if tx.blocking_send(ev).is_err() {
-                println!("Dropped");
-            }
-        }
-    }
-    Ok(())
+    Ok(new_cursor)
 }
 
 // Should also think to capture command failures
@@ -909,10 +968,14 @@ pub fn process_service_logs(
 pub fn handle_service_event(
     service_name: &str,
     tx: tokio::sync::mpsc::Sender<EventData>,
-) -> Result<()> {
-    handle_services!(
+    cursor: Option<String>,
+    limit: i32,
+) -> Result<String> {
+    let new_cursor = handle_services!(
         service_name,
         tx,
+        cursor,
+        limit,
         "sshd.events",
         "sudo.events",
         "login.events",
@@ -922,37 +985,9 @@ pub fn handle_service_event(
         "userchange.events",
         "configchange.events",
         "pkgmanager.events",
-    );
-    Ok(())
-}
+    )?;
 
-pub fn flush_upto_n_entries(
-    tx: tokio::sync::broadcast::Sender<Entry>,
-    unit: Vec<String>,
-    n: usize,
-) -> Result<()> {
-    let mut s: Journal = journal::OpenOptions::default()
-        .all_namespaces(true)
-        .open()?;
-
-    for u in unit {
-        s.match_add("_SYSTEMD_UNIT", u)?;
-    }
-    s.seek_tail()?;
-    s.previous()?;
-
-    let mut count = 0;
-    while let Some(data) = s.previous_entry()? {
-        count += 1;
-        if let Err(e) = tx.send(data) {
-            println!("Dropped event: {e:?}");
-        }
-        if count == n {
-            break;
-        }
-    }
-
-    Ok(())
+    Ok(new_cursor)
 }
 
 pub fn read_journal_logs(

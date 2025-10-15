@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 
-use crate::events::{drain_backlog, drain_data_upto_n, receive_data};
+use crate::events::{drain_older_logs, drain_upto_n_entries, receive_data};
 use crate::parser::{Entry, EventData};
 use axum::{Router, extract::Query, routing::get};
 use http::header;
@@ -9,11 +9,6 @@ use tower_http::cors::{Any, CorsLayer};
 pub async fn render_app(tx: tokio::sync::broadcast::Sender<EventData>) {
     let addr = "0.0.0.0:3200";
     println!("Started Listening at - {addr}");
-
-    // let app = Router::new()
-    //     // .route("/events", get(receive_data))
-    //     .route("/drain_upto", get(drain_data_upto_n))
-    //     .with_state(tx);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -26,10 +21,17 @@ pub async fn render_app(tx: tokio::sync::broadcast::Sender<EventData>) {
         .with_state(tx.clone());
 
     let drain_app = Router::new()
-        .route("/drain", get(drain_backlog))
+        .route("/drain", get(drain_upto_n_entries))
+        .layer(cors.clone());
+
+    let drain_older_logs_app = Router::new()
+        .route("/older", get(drain_older_logs))
         .layer(cors);
 
-    let app = Router::new().merge(live_app).merge(drain_app);
+    let app = Router::new()
+        .merge(live_app)
+        .merge(drain_app)
+        .merge(drain_older_logs_app);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3200")
         .await
         .expect("err");

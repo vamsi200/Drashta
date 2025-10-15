@@ -2,9 +2,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use crate::parser::{
-    Entry, EventData, flush_upto_n_entries, handle_service_event, read_journal_logs,
-};
+use crate::parser::{Entry, EventData, handle_service_event, read_journal_logs};
 use anyhow::Result;
 use axum::extract::{Query, State};
 use axum::{
@@ -49,6 +47,8 @@ pub struct ChunkSize {
 #[derive(Deserialize, Debug)]
 pub struct FilterEvent {
     event_name: Option<String>,
+    cursor: Option<String>,
+    limit: i32,
 }
 
 fn format_thing(map: BTreeMap<String, String>) -> String {
@@ -58,31 +58,7 @@ fn format_thing(map: BTreeMap<String, String>) -> String {
     }
 }
 
-pub async fn drain_data_upto_n(
-    State(tx): State<tokio::sync::broadcast::Sender<Entry>>,
-    chunk_size: Query<ChunkSize>,
-) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    let rx = tx.clone().subscribe();
-    let journal_units = Journalunits::new();
-    let n = chunk_size.0.size;
-
-    assert!(!rx.is_closed());
-    tokio::task::spawn_blocking(move || {
-        println!("Flushing Events upto - {n}");
-        if let Err(e) = flush_upto_n_entries(tx, journal_units, n) {
-            eprintln!("Error: {e}");
-        }
-    });
-
-    let stream = BroadcastStream::new(rx).filter_map(|res| async move {
-        res.ok()
-            .map(|msg| Ok(Event::default().data(format!("{msg:?}"))))
-    });
-
-    Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-pub async fn drain_backlog(
+pub async fn drain_older_logs(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<EventData>(1024);
@@ -92,19 +68,72 @@ pub async fn drain_backlog(
         Some(event) => journal_units.push(event),
         None => journal_units.clear(),
     }
-
-    tokio::task::spawn_blocking(move || {
+    let cursor = filter_event.0.cursor.unwrap();
+    let limit = filter_event.0.limit;
+    let handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
+        let mut last_cursor = String::new();
+
         for ev in journal_units {
-            if let Err(e) = handle_service_event(&ev, tx.clone()) {
-                error!("{e}");
+            info!("Draining {ev} upto {limit} entries");
+            if let Ok(cursor) = handle_service_event(&ev, tx.clone(), None, limit) {
+                last_cursor = cursor;
             }
         }
+
+        last_cursor
     });
+
+    let new_cursor: String = handle.await.unwrap();
+
     let stream = async_stream::stream! {
+        let cursor_json = json!({ "cursor": cursor }).to_string();
+        yield Ok(Event::default().event("cursor").data(cursor_json));
         while let Some(msg) = rx.recv().await {
             let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
-            yield Ok(Event::default().data(json));
+            yield Ok(Event::default().event("log").data(json));
+
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+pub async fn drain_upto_n_entries(
+    filter_event: Query<FilterEvent>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, mut rx) = mpsc::channel::<EventData>(1024);
+    let mut journal_units = Journalunits::new();
+
+    match filter_event.0.event_name {
+        Some(event) => journal_units.push(event),
+        None => journal_units.clear(),
+    }
+    let limit = filter_event.0.limit;
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let tx = tx;
+        let mut last_cursor = String::new();
+
+        for ev in journal_units {
+            info!("Draining {ev} upto {limit} entries");
+            if let Ok(cursor) = handle_service_event(&ev, tx.clone(), None, limit) {
+                last_cursor = cursor;
+            }
+        }
+
+        last_cursor
+    });
+
+    let cursor: String = handle.await.unwrap();
+
+    let stream = async_stream::stream! {
+        let cursor_json = json!({ "cursor": cursor }).to_string();
+        yield Ok(Event::default().event("cursor").data(cursor_json));
+
+        while let Some(msg) = rx.recv().await {
+            let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
+            yield Ok(Event::default().event("log").data(json));
         }
     };
 
