@@ -879,7 +879,6 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
 pub fn process_upto_n_entries(
     mut journal: Journal,
     tx: tokio::sync::mpsc::Sender<EventData>,
-    unit: &str,
     limit: i32,
     config: &ServiceConfig,
 ) -> Result<String> {
@@ -917,24 +916,29 @@ pub fn process_older_logs(
         journal.match_add(field, value.to_string())?;
         journal.match_or()?;
     }
-
     journal.seek_cursor(&cursor)?;
+
+    journal.next_entry()?;
+
     let mut count = 0;
+    let mut last_cursor = cursor.clone();
 
     while count < limit {
-        if let Some(data) = journal.next_entry()? {
-            if let Some(ev) = (config.parser)(data) {
-                if tx.blocking_send(ev).is_err() {
-                    info!("Event Dropped!");
+        match journal.next_entry()? {
+            Some(data) => {
+                if let Some(ev) = (config.parser)(data) {
+                    if tx.blocking_send(ev).is_err() {
+                        info!("Event Dropped!");
+                    }
+                    count += 1;
                 }
-                count += 1;
+                last_cursor = journal.cursor()?;
             }
-        } else {
-            break;
+            None => break,
         }
     }
-    let cursor = journal.cursor()?;
-    Ok(cursor)
+
+    Ok(last_cursor)
 }
 
 //TODO: Include the live part here as well
@@ -957,7 +961,7 @@ pub fn process_service_logs(
 
     let new_cursor = match cursor {
         Some(cursor) => process_older_logs(s, tx, limit, config, cursor)?,
-        None => process_upto_n_entries(s, tx, "sshd.service", limit, config)?,
+        None => process_upto_n_entries(s, tx, limit, config)?,
     };
 
     Ok(new_cursor)
