@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 
-use crate::events::{drain_older_logs, drain_upto_n_entries, receive_data};
+use crate::events::{drain_older_logs, drain_previous_logs, drain_upto_n_entries, receive_data};
 use crate::parser::{Entry, EventData};
 use axum::{Router, extract::Query, routing::get};
 use http::header;
@@ -26,12 +26,18 @@ pub async fn render_app(tx: tokio::sync::broadcast::Sender<EventData>) {
 
     let drain_older_logs_app = Router::new()
         .route("/older", get(drain_older_logs))
+        .layer(cors.clone());
+
+    let drain_previous_logs_app = Router::new()
+        .route("/previous", get(drain_previous_logs))
         .layer(cors);
 
     let app = Router::new()
         .merge(live_app)
         .merge(drain_app)
-        .merge(drain_older_logs_app);
+        .merge(drain_older_logs_app)
+        .merge(drain_previous_logs_app);
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3200")
         .await
         .expect("err");

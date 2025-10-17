@@ -8,7 +8,7 @@ use ahash::AHashMap;
 use aho_corasick::AhoCorasick;
 use anyhow::Result;
 use axum::extract::State;
-use log::info;
+use log::{error, info};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,13 @@ pub type Entry = BTreeMap<String, String>;
 pub enum RawMsgType {
     Structured(BTreeMap<String, String>),
     Plain(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProcessLogType {
+    ProcessInitialLogs,
+    ProcessOlderLogs,
+    ProcessPreviousLogs,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,18 +114,18 @@ macro_rules! insert_fields {
 }
 
 macro_rules! handle_services {
-    ($service_name:expr, $tx:expr, $cursor:expr, $limit:expr, $($service:expr),* $(,)?) => {{
+    ($service_name:expr, $tx:expr, $cursor:expr, $limit:expr, $processlogtype:expr, $($service:expr),* $(,)?) => {{
         let result: Result<String, anyhow::Error> = if let Some(cursor_val) = $cursor.clone() {
             match $service_name {
                 $(
-                    $service => process_service_logs($service, $tx.clone(), Some(cursor_val.clone()), $limit),
+                    $service => process_service_logs($service, $tx.clone(), Some(cursor_val.clone()), $limit, $processlogtype.clone()),
                 )*
                 _ => Ok(String::new()),
             }
         } else {
             match $service_name {
                 $(
-                    $service => process_service_logs($service, $tx.clone(), None, $limit),
+                    $service => process_service_logs($service, $tx.clone(), None, $limit, $processlogtype.clone()),
                 )*
                 _ => Ok(String::new()),
             }
@@ -893,7 +900,7 @@ pub fn process_upto_n_entries(
         if let Some(data) = journal.next_entry()? {
             if let Some(ev) = (config.parser)(data) {
                 if tx.blocking_send(ev).is_err() {
-                    info!("Event Dropped!");
+                    error!("Event Dropped!");
                 }
                 count += 1;
             }
@@ -905,6 +912,7 @@ pub fn process_upto_n_entries(
     let cursor = journal.cursor()?;
     Ok(cursor)
 }
+
 pub fn process_older_logs(
     mut journal: Journal,
     tx: tokio::sync::mpsc::Sender<EventData>,
@@ -928,7 +936,7 @@ pub fn process_older_logs(
             Some(data) => {
                 if let Some(ev) = (config.parser)(data) {
                     if tx.blocking_send(ev).is_err() {
-                        info!("Event Dropped!");
+                        error!("Event Dropped!");
                     }
                     count += 1;
                 }
@@ -941,6 +949,44 @@ pub fn process_older_logs(
     Ok(last_cursor)
 }
 
+pub fn process_previous_logs(
+    mut journal: Journal,
+    tx: tokio::sync::mpsc::Sender<EventData>,
+    limit: i32,
+    config: &ServiceConfig,
+    cursor: String,
+) -> Result<String> {
+    for (i, (field, value)) in config.matches.iter().enumerate() {
+        journal.match_add(field, value.to_string())?;
+        if i < config.matches.len() - 1 {
+            journal.match_or()?;
+        }
+    }
+
+    journal.seek_cursor(&cursor)?;
+
+    let mut count = 0;
+    let mut last_cursor = cursor.clone();
+    let mut entry_count = 0;
+    while count < limit {
+        match journal.previous_entry()? {
+            Some(data) => {
+                if let Some(ev) = (config.parser)(data) {
+                    if tx.blocking_send(ev).is_err() {
+                        error!("Event Dropped!");
+                    }
+                    count += 1;
+                    entry_count += 1;
+                }
+                last_cursor = journal.cursor()?;
+            }
+            None => break,
+        }
+    }
+    info!("Total Entries - {}", entry_count);
+    Ok(last_cursor)
+}
+
 //TODO: Include the live part here as well
 //Add the PkgManager impl
 pub fn process_service_logs(
@@ -948,20 +994,29 @@ pub fn process_service_logs(
     tx: tokio::sync::mpsc::Sender<EventData>,
     cursor: Option<String>,
     limit: i32,
-) -> Result<String> {
+    processlogtype: ProcessLogType,
+) -> Result<String, anyhow::Error> {
     let configs = get_service_configs();
 
     let Some(config) = configs.get(service_name) else {
-        anyhow::bail!("Unknown service: {}", service_name);
+        ::anyhow::bail!("Unknown Service {}", service_name);
     };
 
     let s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()?;
 
-    let new_cursor = match cursor {
-        Some(cursor) => process_older_logs(s, tx, limit, config, cursor)?,
-        None => process_upto_n_entries(s, tx, limit, config)?,
+    let new_cursor = match (cursor, processlogtype) {
+        (Some(cursor), ProcessLogType::ProcessOlderLogs) => {
+            process_older_logs(s, tx.clone(), limit, config, cursor)?
+        }
+        (Some(cursor), ProcessLogType::ProcessPreviousLogs) => {
+            process_previous_logs(s, tx.clone(), limit, config, cursor)?
+        }
+        (None, ProcessLogType::ProcessInitialLogs) => {
+            process_upto_n_entries(s, tx.clone(), limit, config)?
+        }
+        _ => String::new(),
     };
 
     Ok(new_cursor)
@@ -974,12 +1029,14 @@ pub fn handle_service_event(
     tx: tokio::sync::mpsc::Sender<EventData>,
     cursor: Option<String>,
     limit: i32,
+    processlogtype: ProcessLogType,
 ) -> Result<String> {
     let new_cursor = handle_services!(
         service_name,
         tx,
         cursor,
         limit,
+        processlogtype,
         "sshd.events",
         "sudo.events",
         "login.events",

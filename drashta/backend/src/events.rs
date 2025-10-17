@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use crate::parser::{Entry, EventData, handle_service_event, read_journal_logs};
+use crate::parser::{Entry, EventData, ProcessLogType, handle_service_event, read_journal_logs};
 use anyhow::Result;
 use axum::extract::{Query, State};
 use axum::{
@@ -75,8 +75,14 @@ pub async fn drain_older_logs(
         let mut last_cursor = String::new();
 
         for ev in journal_units {
-            info!("Draining {ev} upto {limit} entries");
-            if let Ok(cursor) = handle_service_event(&ev, tx.clone(), None, limit) {
+            info!("Draining {ev} from {cursor} upto {limit} entries (next)");
+            if let Ok(cursor) = handle_service_event(
+                &ev,
+                tx.clone(),
+                Some(cursor.clone()),
+                limit,
+                ProcessLogType::ProcessOlderLogs,
+            ) {
                 last_cursor = cursor;
             }
         }
@@ -87,7 +93,7 @@ pub async fn drain_older_logs(
     let new_cursor: String = handle.await.unwrap();
 
     let stream = async_stream::stream! {
-        let cursor_json = json!({ "cursor": cursor }).to_string();
+        let cursor_json = json!({ "cursor": new_cursor }).to_string();
         yield Ok(Event::default().event("cursor").data(cursor_json));
         while let Some(msg) = rx.recv().await {
             let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
@@ -117,7 +123,13 @@ pub async fn drain_upto_n_entries(
 
         for ev in journal_units {
             info!("Draining {ev} upto {limit} entries");
-            if let Ok(cursor) = handle_service_event(&ev, tx.clone(), None, limit) {
+            if let Ok(cursor) = handle_service_event(
+                &ev,
+                tx.clone(),
+                None,
+                limit,
+                ProcessLogType::ProcessInitialLogs,
+            ) {
                 last_cursor = cursor;
             }
         }
@@ -140,6 +152,52 @@ pub async fn drain_upto_n_entries(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+pub async fn drain_previous_logs(
+    filter_event: Query<FilterEvent>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, mut rx) = mpsc::channel::<EventData>(1024);
+    let mut journal_units = Journalunits::new();
+
+    match filter_event.0.event_name {
+        Some(event) => journal_units.push(event),
+        None => journal_units.clear(),
+    }
+    let cursor = filter_event.0.cursor.unwrap();
+    let limit = filter_event.0.limit;
+    let handle = tokio::task::spawn_blocking(move || {
+        let tx = tx;
+        let mut last_cursor = String::new();
+
+        for ev in journal_units {
+            info!("Draining {ev} from {cursor} upto {limit} entries (prev)");
+            if let Ok(cursor) = handle_service_event(
+                &ev,
+                tx.clone(),
+                Some(cursor.clone()),
+                limit,
+                ProcessLogType::ProcessPreviousLogs,
+            ) {
+                last_cursor = cursor;
+            }
+        }
+
+        last_cursor
+    });
+
+    let new_cursor: String = handle.await.unwrap();
+
+    let stream = async_stream::stream! {
+        let cursor_json = json!({ "cursor": new_cursor }).to_string();
+        yield Ok(Event::default().event("cursor").data(cursor_json));
+        while let Some(msg) = rx.recv().await {
+            let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
+            yield Ok(Event::default().event("log").data(json));
+
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
 pub async fn receive_data(
     State(tx): State<tokio::sync::broadcast::Sender<EventData>>,
     filter_event: Query<FilterEvent>,
