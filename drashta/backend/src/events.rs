@@ -2,7 +2,9 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use crate::parser::{Entry, EventData, ProcessLogType, handle_service_event, read_journal_logs};
+use crate::parser::{
+    CursorType, Entry, EventData, ProcessLogType, handle_service_event, read_journal_logs,
+};
 use anyhow::Result;
 use axum::extract::{Query, State};
 use axum::{
@@ -72,7 +74,7 @@ pub async fn drain_older_logs(
     let limit = filter_event.0.limit;
     let handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
-        let mut last_cursor = String::new();
+        let mut last_cursor = CursorType::Journal(String::new());
 
         for ev in journal_units {
             info!("Draining {ev} from {cursor} upto {limit} entries (next)");
@@ -90,7 +92,7 @@ pub async fn drain_older_logs(
         last_cursor
     });
 
-    let new_cursor: String = handle.await.unwrap();
+    let new_cursor = handle.await.unwrap();
 
     let stream = async_stream::stream! {
         let cursor_json = json!({ "cursor": new_cursor }).to_string();
@@ -119,7 +121,7 @@ pub async fn drain_upto_n_entries(
 
     let handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
-        let mut last_cursor = String::new();
+        let mut last_cursor = CursorType::Journal(String::new());
 
         for ev in journal_units {
             info!("Draining {ev} upto {limit} entries");
@@ -137,7 +139,7 @@ pub async fn drain_upto_n_entries(
         last_cursor
     });
 
-    let cursor: String = handle.await.unwrap();
+    let cursor = handle.await.unwrap();
 
     let stream = async_stream::stream! {
         let cursor_json = json!({ "cursor": cursor }).to_string();
@@ -166,7 +168,7 @@ pub async fn drain_previous_logs(
     let limit = filter_event.0.limit;
     let handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
-        let mut last_cursor = String::new();
+        let mut last_cursor = CursorType::Journal(String::new());
 
         for ev in journal_units {
             info!("Draining {ev} from {cursor} upto {limit} entries (prev)");
@@ -184,7 +186,7 @@ pub async fn drain_previous_logs(
         last_cursor
     });
 
-    let new_cursor: String = handle.await.unwrap();
+    let new_cursor = handle.await.unwrap();
 
     let stream = async_stream::stream! {
         let cursor_json = json!({ "cursor": new_cursor }).to_string();

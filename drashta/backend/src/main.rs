@@ -2,30 +2,31 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use std::vec;
-
-use crate::parser::{flush_previous_data, read_journal_logs};
+use crate::parser::read_journal_logs;
 use anyhow::{Ok, Result};
-use drashta::parser::{self, Entry, EventData};
+use drashta::events::receive_data;
+use drashta::parser::{
+    self, Cursor, Entry, EventData, process_manual_events_next, process_manual_events_previous,
+    process_manual_events_upto_n,
+};
 use drashta::render::render_app;
+use log::info;
 use std::borrow::Cow;
+use std::vec;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    let (tx, _) = tokio::sync::broadcast::channel::<EventData>(1);
-
-    // tokio::spawn(receive_data(tx.clone())).await?;
+    env_logger::init();
+    let (tx, _) = tokio::sync::broadcast::channel::<EventData>(1024);
+    // let (tx, _) = tokio::sync::mpsc::channel::<EventData>(1024);
     let _ = render_app(tx).await;
-    // let unit = vec!["sshd.service"];
+    // let cursor = manual_parse(tx, "pkgmanager.events", 100)?;
+    // info!("Cursor : {:?}", cursor);
     //
-    // let _ = flush_previous_data(tx, None);
+    // process_manual_events_next(tx, "pkgmanager.events", cursor, 30000)?;
 
-    // read_journal_logs(tx.clone(), Some("NetworkManager.service"))
-    //     .await
-    //     .unwrap();
-    // render_app(tx.clone()).await;
+    // process_manual_events_previous(tx, "pkgmanager.events", cursor, 10)?;
 
-    // flush_previous_data(tx, d).await?;
     Ok(())
 }
 
@@ -36,7 +37,6 @@ mod tests {
     #[test]
     fn check_sshd() {
         let unit = vec!["sshd.service"];
-        let (tx, _) = tokio::sync::broadcast::channel::<Entry>(1);
-        // let _ = flush_previous_data(tx, unit);
+        let (tx, _) = tokio::sync::broadcast::channel::<Entry>(1024);
     }
 }

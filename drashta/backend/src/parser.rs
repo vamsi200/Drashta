@@ -5,17 +5,19 @@
 use crate::events;
 use crate::events::receive_data;
 use ahash::AHashMap;
-use aho_corasick::AhoCorasick;
+use aho_corasick::{AhoCorasick, AhoCorasickKind, dfa};
+use aho_corasick::{Input, Match, automaton::Automaton, dfa::DFA};
 use anyhow::Result;
 use axum::extract::State;
 use log::{error, info};
+use memchr::memmem;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::PathBuf;
 use std::result::Result::Ok;
 use std::sync::Arc;
@@ -36,8 +38,15 @@ pub type Entry = BTreeMap<String, String>;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type", content = "value")]
 pub enum RawMsgType {
-    Structured(BTreeMap<String, String>),
+    Structured(Entry),
     Plain(String),
+}
+
+#[derive(PartialEq, Deserialize, Serialize, Debug)]
+pub struct Cursor {
+    pub timestamp: String,
+    pub data: String,
+    pub offset: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +113,8 @@ pub struct ServiceConfig {
     matches: Vec<(&'static str, &'static str)>,
     parser: ParserFn,
 }
+
+pub static MANUAL_PARSE_EVENTS: Lazy<Vec<&'static str>> = Lazy::new(|| vec!["pkgmanager.events"]);
 
 macro_rules! insert_fields {
     ($map:expr, $msg:expr, { $($key:expr => $idx:expr),+ $(,)? }) => {
@@ -967,7 +978,6 @@ pub fn process_previous_logs(
 
     let mut count = 0;
     let mut last_cursor = cursor.clone();
-    let mut entry_count = 0;
     while count < limit {
         match journal.previous_entry()? {
             Some(data) => {
@@ -976,14 +986,12 @@ pub fn process_previous_logs(
                         error!("Event Dropped!");
                     }
                     count += 1;
-                    entry_count += 1;
                 }
                 last_cursor = journal.cursor()?;
             }
             None => break,
         }
     }
-    info!("Total Entries - {}", entry_count);
     Ok(last_cursor)
 }
 
@@ -999,7 +1007,7 @@ pub fn process_service_logs(
     let configs = get_service_configs();
 
     let Some(config) = configs.get(service_name) else {
-        ::anyhow::bail!("Unknown Service {}", service_name);
+        ::anyhow::bail!("Unknown Service: {}", service_name);
     };
 
     let s: Journal = journal::OpenOptions::default()
@@ -1022,6 +1030,187 @@ pub fn process_service_logs(
     Ok(new_cursor)
 }
 
+pub fn process_manual_events_upto_n(
+    tx: tokio::sync::mpsc::Sender<EventData>,
+    service_name: &str,
+    limit: i32,
+) -> Result<Option<Cursor>> {
+    let mut cursor: Option<Cursor> = None;
+
+    if service_name == "pkgmanager.events" {
+        let file_name = PathBuf::from("/var/log/pacman.log");
+        let file = File::open(file_name).unwrap();
+        let mut reader = BufReader::with_capacity(128 * 1024, file);
+        info!("Called pkgmanager.events");
+        let mut count = 0;
+        let mut buf = String::new();
+        let mut line_count = 0;
+        while reader.read_line(&mut buf).unwrap() > 0 && count < limit {
+            let offset = reader.stream_position()?;
+            line_count += 1;
+            if let Some(ev) = parse_pkg_events(buf.trim_end().to_string()) {
+                if tx.blocking_send(ev.clone()).is_err() {
+                    error!("Event Dropped!");
+                }
+                count += 1;
+                if cursor.is_none() {
+                    let timestamp = ev.timestamp.clone();
+                    let mut data = String::new();
+                    match ev.raw_msg.clone() {
+                        RawMsgType::Plain(s) => {
+                            data = s;
+                        }
+                        _ => {}
+                    }
+                    cursor = Some(Cursor {
+                        timestamp,
+                        data,
+                        offset,
+                    })
+                }
+            }
+            buf.clear();
+        }
+    }
+    Ok(cursor)
+}
+pub fn process_manual_events_next(
+    tx: tokio::sync::mpsc::Sender<EventData>,
+    service_name: &str,
+    cursor: Cursor,
+    limit: i32,
+) -> Result<Option<Cursor>> {
+    let mut new_cursor: Option<Cursor> = None;
+
+    if service_name == "pkgmanager.events" {
+        let patterns = [cursor.timestamp.as_bytes()];
+
+        let file = File::open("/var/log/pacman.log")?;
+        let mut reader = BufReader::new(&file);
+        let mut line_count = 0;
+        info!("Searching Pattern - {:?}", cursor.timestamp);
+
+        let buf = [0u8; 8192];
+        let mut line = String::new();
+
+        reader.seek(std::io::SeekFrom::Start(cursor.offset))?;
+        info!("Seeking from {}", cursor.offset);
+
+        while reader.read_line(&mut line)? > 0 {
+            line_count += 1;
+            let offset = reader.stream_position()? - line.len() as u64;
+
+            if line_count == 1 {
+                if patterns
+                    .iter()
+                    .all(|pat| memmem::find(line.as_bytes(), pat).is_none())
+                {
+                    error!("Line Mismatch!");
+                    break;
+                }
+            }
+
+            if let Some(ev) = parse_pkg_events(line.trim_end().to_string()) {
+                if tx.blocking_send(ev.clone()).is_err() {
+                    error!("Event Dropped!");
+                }
+
+                if new_cursor.is_none() {
+                    let timestamp = ev.timestamp.clone();
+                    let data = match ev.raw_msg.clone() {
+                        RawMsgType::Plain(s) => s,
+                        _ => String::new(),
+                    };
+                    new_cursor = Some(Cursor {
+                        timestamp,
+                        data,
+                        offset,
+                    });
+                }
+            }
+
+            line.clear();
+        }
+    }
+    Ok(new_cursor)
+}
+
+pub fn process_manual_events_previous(
+    tx: tokio::sync::mpsc::Sender<EventData>,
+    service_name: &str,
+    cursor: Cursor,
+    limit: i32,
+) -> Result<Option<Cursor>> {
+    let mut new_cursor: Option<Cursor> = None;
+
+    let chunk_size = 8192;
+    if service_name == "pkgmanager.events" {
+        let patterns = [cursor.timestamp.as_bytes(), cursor.data.as_bytes()];
+        info!("Searching Pattern - {:?}", cursor);
+        let offset = cursor.offset;
+        let lines = read_file_backward("/var/log/pacman.log", offset)?;
+
+        if patterns
+            .iter()
+            .all(|pat| memmem::find(lines.iter().nth(0).unwrap().as_bytes(), pat).is_some())
+        {
+            for line in lines {
+                if let Some(ev) = parse_pkg_events(line.trim_end().to_string()) {
+                    if tx.blocking_send(ev.clone()).is_err() {
+                        error!("Event Dropped!");
+                    }
+
+                    if new_cursor.is_none() {
+                        let timestamp = ev.timestamp.clone();
+                        let data = match ev.raw_msg.clone() {
+                            RawMsgType::Plain(s) => s,
+                            _ => String::new(),
+                        };
+                        new_cursor = Some(Cursor {
+                            timestamp,
+                            data,
+                            offset,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(new_cursor)
+}
+
+pub fn read_file_backward(path: &str, mut offset: u64) -> Result<Vec<String>> {
+    let mut file = File::open(path)?;
+    let reader = BufReader::new(&file);
+    let chunk_size = 8192;
+    let mut out = Vec::new();
+
+    while offset > 0 {
+        let read_size = chunk_size.min(offset as usize);
+        offset -= read_size as u64;
+        let mut buf = vec![0u8; read_size];
+        file.seek(std::io::SeekFrom::Start(offset))?;
+        file.read_exact(&mut buf)?;
+
+        let split: Vec<&[u8]> = buf.split(|&b| b == b'\n').collect();
+
+        for &line in split.iter().rev() {
+            if !line.is_empty() {
+                out.push(String::from_utf8_lossy(line).to_string());
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum CursorType {
+    Journal(String),
+    Manual(Cursor),
+}
+
 // Should also think to capture command failures
 //TODO: Need to check the name's of the services beacuse there are different on different distros
 pub fn handle_service_event(
@@ -1030,25 +1219,37 @@ pub fn handle_service_event(
     cursor: Option<String>,
     limit: i32,
     processlogtype: ProcessLogType,
-) -> Result<String> {
-    let new_cursor = handle_services!(
-        service_name,
-        tx,
-        cursor,
-        limit,
-        processlogtype,
-        "sshd.events",
-        "sudo.events",
-        "login.events",
-        "firewall.events",
-        "network.events",
-        "kernel.events",
-        "userchange.events",
-        "configchange.events",
-        "pkgmanager.events",
-    )?;
+) -> Result<CursorType> {
+    let mut curso_type = CursorType::Journal(String::new());
 
-    Ok(new_cursor)
+    for &ev in MANUAL_PARSE_EVENTS.iter() {
+        if ev == service_name {
+            if let Some(cursor) = process_manual_events_upto_n(tx.clone(), ev, limit)? {
+                curso_type = CursorType::Manual(cursor)
+            }
+        } else {
+            if let Ok(cursor) = handle_services!(
+                service_name,
+                tx,
+                cursor,
+                limit,
+                processlogtype,
+                "sshd.events",
+                "sudo.events",
+                "login.events",
+                "firewall.events",
+                "network.events",
+                "kernel.events",
+                "userchange.events",
+                "configchange.events",
+                "pkgmanager.events",
+            ) {
+                curso_type = CursorType::Journal(cursor);
+            }
+        }
+    }
+
+    Ok(curso_type)
 }
 
 pub fn read_journal_logs(
