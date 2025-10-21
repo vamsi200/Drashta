@@ -13,6 +13,7 @@ use log::{error, info};
 use memchr::memmem;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::borrow::Cow;
@@ -20,6 +21,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::PathBuf;
 use std::result::Result::Ok;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use std::{
@@ -42,7 +44,7 @@ pub enum RawMsgType {
     Plain(String),
 }
 
-#[derive(PartialEq, Deserialize, Serialize, Debug)]
+#[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
 pub struct Cursor {
     pub timestamp: String,
     pub data: String,
@@ -125,22 +127,29 @@ macro_rules! insert_fields {
 }
 
 macro_rules! handle_services {
-    ($service_name:expr, $tx:expr, $cursor:expr, $limit:expr, $processlogtype:expr, $($service:expr),* $(,)?) => {{
-        let result: Result<String, anyhow::Error> = if let Some(cursor_val) = $cursor.clone() {
-            match $service_name {
-                $(
-                    $service => process_service_logs($service, $tx.clone(), Some(cursor_val.clone()), $limit, $processlogtype.clone()),
-                )*
-                _ => Ok(String::new()),
-            }
-        } else {
-            match $service_name {
-                $(
-                    $service => process_service_logs($service, $tx.clone(), None, $limit, $processlogtype.clone()),
-                )*
-                _ => Ok(String::new()),
-            }
+    (
+        $service_name:expr,
+        $tx:expr,
+        $cursor:expr,
+        $limit:expr,
+        $processlogtype:expr,
+        $($service:expr),* $(,)?
+    ) => {{
+        let cursor_opt: Option<String> = $cursor.clone();
+
+        let result: Result<String, anyhow::Error> = match $service_name {
+            $(
+                $service => process_service_logs(
+                    $service,
+                    $tx.clone(),
+                    cursor_opt.clone(),
+                    $limit,
+                    $processlogtype.clone(),
+                ),
+            )*
+            _ => Ok(String::new()),
         };
+
         result
     }};
 }
@@ -1074,6 +1083,7 @@ pub fn process_manual_events_upto_n(
     }
     Ok(cursor)
 }
+
 pub fn process_manual_events_next(
     tx: tokio::sync::mpsc::Sender<EventData>,
     service_name: &str,
@@ -1081,20 +1091,20 @@ pub fn process_manual_events_next(
     limit: i32,
 ) -> Result<Option<Cursor>> {
     let mut new_cursor: Option<Cursor> = None;
+    let mut count = 0;
 
     if service_name == "pkgmanager.events" {
         let patterns = [cursor.timestamp.as_bytes()];
 
         let file = File::open("/var/log/pacman.log")?;
         let mut reader = BufReader::new(&file);
-        let mut line_count = 0;
-        info!("Searching Pattern - {:?}", cursor.timestamp);
 
-        let buf = [0u8; 8192];
         let mut line = String::new();
 
         reader.seek(std::io::SeekFrom::Start(cursor.offset))?;
         info!("Seeking from {}", cursor.offset);
+
+        let mut line_count = 0;
 
         while reader.read_line(&mut line)? > 0 {
             line_count += 1;
@@ -1108,24 +1118,31 @@ pub fn process_manual_events_next(
                     error!("Line Mismatch!");
                     break;
                 }
+                line.clear();
+                continue;
             }
 
             if let Some(ev) = parse_pkg_events(line.trim_end().to_string()) {
                 if tx.blocking_send(ev.clone()).is_err() {
                     error!("Event Dropped!");
+                    break;
                 }
 
-                if new_cursor.is_none() {
-                    let timestamp = ev.timestamp.clone();
-                    let data = match ev.raw_msg.clone() {
-                        RawMsgType::Plain(s) => s,
-                        _ => String::new(),
-                    };
-                    new_cursor = Some(Cursor {
-                        timestamp,
-                        data,
-                        offset,
-                    });
+                count += 1;
+
+                let timestamp = ev.timestamp.clone();
+                let data = match ev.raw_msg.clone() {
+                    RawMsgType::Plain(s) => s,
+                    _ => String::new(),
+                };
+                new_cursor = Some(Cursor {
+                    timestamp,
+                    data,
+                    offset,
+                });
+
+                if count >= limit {
+                    break;
                 }
             }
 
@@ -1146,18 +1163,22 @@ pub fn process_manual_events_previous(
     let chunk_size = 8192;
     if service_name == "pkgmanager.events" {
         let patterns = [cursor.timestamp.as_bytes(), cursor.data.as_bytes()];
-        info!("Searching Pattern - {:?}", cursor);
         let offset = cursor.offset;
         let lines = read_file_backward("/var/log/pacman.log", offset)?;
-
+        let mut count = 0;
         if patterns
             .iter()
             .all(|pat| memmem::find(lines.iter().nth(0).unwrap().as_bytes(), pat).is_some())
         {
             for line in lines {
+                if count >= limit {
+                    break;
+                }
                 if let Some(ev) = parse_pkg_events(line.trim_end().to_string()) {
                     if tx.blocking_send(ev.clone()).is_err() {
-                        error!("Event Dropped!");
+                        continue;
+                    } else {
+                        count += 1;
                     }
 
                     if new_cursor.is_none() {
@@ -1174,41 +1195,94 @@ pub fn process_manual_events_previous(
                     }
                 }
             }
+        } else {
+            error!("Line Mismatch!");
         }
     }
-
     Ok(new_cursor)
 }
 
-pub fn read_file_backward(path: &str, mut offset: u64) -> Result<Vec<String>> {
+pub fn read_file_backward(path: &str, offset: u64) -> Result<Vec<String>> {
     let mut file = File::open(path)?;
-    let reader = BufReader::new(&file);
     let chunk_size = 8192;
     let mut out = Vec::new();
+    let mut partial_line = String::new();
+    let mut current_pos = offset;
 
-    while offset > 0 {
-        let read_size = chunk_size.min(offset as usize);
-        offset -= read_size as u64;
+    file.seek(std::io::SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(&file);
+    let mut line_at_offset = String::new();
+    reader.read_line(&mut line_at_offset)?;
+
+    if !line_at_offset.is_empty() {
+        out.push(line_at_offset.trim_end_matches('\n').to_string());
+    }
+
+    file = File::open(path)?;
+
+    while current_pos > 0 {
+        let read_size = chunk_size.min(current_pos as usize);
+        current_pos -= read_size as u64;
+
         let mut buf = vec![0u8; read_size];
-        file.seek(std::io::SeekFrom::Start(offset))?;
+        file.seek(std::io::SeekFrom::Start(current_pos))?;
         file.read_exact(&mut buf)?;
 
-        let split: Vec<&[u8]> = buf.split(|&b| b == b'\n').collect();
+        let chunk = String::from_utf8_lossy(&buf).to_string();
 
-        for &line in split.iter().rev() {
+        let full_chunk = format!("{}{}", chunk, partial_line);
+        let split: Vec<&str> = full_chunk.split('\n').collect();
+
+        partial_line = split[0].to_string();
+
+        for line in split.iter().skip(1).rev() {
             if !line.is_empty() {
-                out.push(String::from_utf8_lossy(line).to_string());
+                out.push(line.to_string());
             }
         }
+    }
+
+    if current_pos == 0 && !partial_line.is_empty() {
+        out.push(partial_line);
     }
 
     Ok(out)
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub enum CursorType {
     Journal(String),
     Manual(Cursor),
+}
+
+impl FromStr for CursorType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with("Journal:") {
+            Ok(CursorType::Journal(s["Journal:".len()..].to_string()))
+        } else if s.starts_with("Manual:") {
+            let json_str = &s["Manual:".len()..];
+            serde_json::from_str::<Cursor>(json_str)
+                .map(CursorType::Manual)
+                .map_err(|e| format!("Failed to parse Manual cursor: {}", e))
+        } else {
+            Err(format!("Unknown cursor variant: {}", s))
+        }
+    }
+}
+
+pub fn deserialize_cursor<'de, D>(deserializer: D) -> Result<Option<CursorType>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    match s {
+        Some(s) if !s.is_empty() => serde_json::from_str::<CursorType>(&s)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        _ => Ok(None),
+    }
 }
 
 // Should also think to capture command failures
@@ -1216,40 +1290,87 @@ pub enum CursorType {
 pub fn handle_service_event(
     service_name: &str,
     tx: tokio::sync::mpsc::Sender<EventData>,
-    cursor: Option<String>,
+    cursor: Option<CursorType>,
     limit: i32,
     processlogtype: ProcessLogType,
-) -> Result<CursorType> {
-    let mut curso_type = CursorType::Journal(String::new());
+) -> Result<Option<CursorType>> {
+    let mut cursor_type: Option<CursorType> = None;
 
-    for &ev in MANUAL_PARSE_EVENTS.iter() {
-        if ev == service_name {
-            if let Some(cursor) = process_manual_events_upto_n(tx.clone(), ev, limit)? {
-                curso_type = CursorType::Manual(cursor)
+    let is_manual_service = MANUAL_PARSE_EVENTS.iter().any(|&ev| ev == service_name);
+
+    if is_manual_service {
+        match processlogtype {
+            ProcessLogType::ProcessInitialLogs => {
+                if let Some(c) = process_manual_events_upto_n(tx.clone(), service_name, limit)? {
+                    cursor_type = Some(CursorType::Manual(c));
+                }
             }
-        } else {
-            if let Ok(cursor) = handle_services!(
-                service_name,
-                tx,
-                cursor,
-                limit,
-                processlogtype,
-                "sshd.events",
-                "sudo.events",
-                "login.events",
-                "firewall.events",
-                "network.events",
-                "kernel.events",
-                "userchange.events",
-                "configchange.events",
-                "pkgmanager.events",
-            ) {
-                curso_type = CursorType::Journal(cursor);
+            ProcessLogType::ProcessOlderLogs => {
+                if let Some(CursorType::Manual(c)) = cursor {
+                    if let Some(next_c) =
+                        process_manual_events_next(tx.clone(), service_name, c, limit)?
+                    {
+                        cursor_type = Some(CursorType::Manual(next_c));
+                    }
+                }
+            }
+            ProcessLogType::ProcessPreviousLogs => {
+                if let Some(CursorType::Manual(c)) = cursor {
+                    if let Some(prev_c) =
+                        process_manual_events_previous(tx.clone(), service_name, c, limit)?
+                    {
+                        cursor_type = Some(CursorType::Manual(prev_c));
+                    }
+                }
             }
         }
+    } else {
+        match cursor {
+            Some(CursorType::Journal(c)) => {
+                if let Ok(new_c) = handle_services!(
+                    service_name,
+                    tx,
+                    Some(c),
+                    limit,
+                    processlogtype,
+                    "sshd.events",
+                    "sudo.events",
+                    "login.events",
+                    "firewall.events",
+                    "network.events",
+                    "kernel.events",
+                    "userchange.events",
+                    "configchange.events",
+                    "pkgmanager.events",
+                ) {
+                    cursor_type = Some(CursorType::Journal(new_c));
+                }
+            }
+            None => {
+                info!("Invoked (initial)!");
+                if let Ok(new_c) = handle_services!(
+                    service_name,
+                    tx,
+                    None,
+                    limit,
+                    processlogtype,
+                    "sshd.events",
+                    "sudo.events",
+                    "login.events",
+                    "firewall.events",
+                    "network.events",
+                    "kernel.events",
+                    "userchange.events",
+                    "configchange.events",
+                    "pkgmanager.events",
+                ) {
+                    cursor_type = Some(CursorType::Journal(new_c));
+                }
+            }
+            _ => {}
+        }
     }
-
-    Ok(curso_type)
+    Ok(cursor_type)
 }
 
 pub fn read_journal_logs(

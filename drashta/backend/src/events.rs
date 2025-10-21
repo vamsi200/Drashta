@@ -3,7 +3,8 @@
 #![allow(unused_imports)]
 
 use crate::parser::{
-    CursorType, Entry, EventData, ProcessLogType, handle_service_event, read_journal_logs,
+    Cursor, CursorType, Entry, EventData, ProcessLogType, deserialize_cursor, handle_service_event,
+    read_journal_logs,
 };
 use anyhow::Result;
 use axum::extract::{Query, State};
@@ -46,10 +47,11 @@ pub struct ChunkSize {
     size: usize,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct FilterEvent {
     event_name: Option<String>,
-    cursor: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_cursor")]
+    cursor: Option<CursorType>,
     limit: i32,
 }
 
@@ -70,26 +72,31 @@ pub async fn drain_older_logs(
         Some(event) => journal_units.push(event),
         None => journal_units.clear(),
     }
-    let cursor = filter_event.0.cursor.unwrap();
     let limit = filter_event.0.limit;
+
+    let cursor_type = filter_event.0.cursor.unwrap();
     let handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
-        let mut last_cursor = CursorType::Journal(String::new());
+        let mut new_cursor_type: Option<CursorType> = None;
 
         for ev in journal_units {
-            info!("Draining {ev} from {cursor} upto {limit} entries (next)");
-            if let Ok(cursor) = handle_service_event(
+            info!(
+                "Draining {ev} from {:?} upto {limit} entries (next)",
+                cursor_type
+            );
+
+            if let Ok(cursor_type) = handle_service_event(
                 &ev,
                 tx.clone(),
-                Some(cursor.clone()),
+                Some(cursor_type.clone()),
                 limit,
                 ProcessLogType::ProcessOlderLogs,
             ) {
-                last_cursor = cursor;
+                new_cursor_type = cursor_type
             }
         }
 
-        last_cursor
+        new_cursor_type
     });
 
     let new_cursor = handle.await.unwrap();
@@ -110,29 +117,38 @@ pub async fn drain_older_logs(
 pub async fn drain_upto_n_entries(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    use serde_json::{json, to_string};
+    use tokio::sync::mpsc;
+
     let (tx, mut rx) = mpsc::channel::<EventData>(1024);
     let mut journal_units = Journalunits::new();
 
-    match filter_event.0.event_name {
-        Some(event) => journal_units.push(event),
+    match &filter_event.0.event_name {
+        Some(event) => journal_units.push(event.clone()),
         None => journal_units.clear(),
     }
+
     let limit = filter_event.0.limit;
+    let journal_units_clone = journal_units.clone();
+    let tx_clone = tx.clone();
 
     let handle = tokio::task::spawn_blocking(move || {
-        let tx = tx;
-        let mut last_cursor = CursorType::Journal(String::new());
+        let mut last_cursor: Option<CursorType> = None;
 
-        for ev in journal_units {
-            info!("Draining {ev} upto {limit} entries");
+        for ev in journal_units_clone {
+            info!("Draining {ev} up to {limit} entries");
+
             if let Ok(cursor) = handle_service_event(
                 &ev,
-                tx.clone(),
+                tx_clone.clone(),
                 None,
                 limit,
                 ProcessLogType::ProcessInitialLogs,
             ) {
-                last_cursor = cursor;
+                if let Some(cursor_type) = cursor {
+                    last_cursor = Some(cursor_type);
+                    info!("Cursor - {:?}", last_cursor);
+                }
             }
         }
 
@@ -140,10 +156,12 @@ pub async fn drain_upto_n_entries(
     });
 
     let cursor = handle.await.unwrap();
-
+    info!("Cursor - {:?}", cursor);
     let stream = async_stream::stream! {
-        let cursor_json = json!({ "cursor": cursor }).to_string();
-        yield Ok(Event::default().event("cursor").data(cursor_json));
+        if let Some(cursor) = cursor {
+            let cursor_json = json!({ "cursor": cursor }).to_string();
+            yield Ok(Event::default().event("cursor").data(cursor_json));
+        }
 
         while let Some(msg) = rx.recv().await {
             let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
@@ -164,26 +182,32 @@ pub async fn drain_previous_logs(
         Some(event) => journal_units.push(event),
         None => journal_units.clear(),
     }
-    let cursor = filter_event.0.cursor.unwrap();
     let limit = filter_event.0.limit;
+
+    let cursor_type = filter_event.0.cursor.unwrap();
+
     let handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
-        let mut last_cursor = CursorType::Journal(String::new());
+        let mut new_cursor_type: Option<CursorType> = None;
 
         for ev in journal_units {
-            info!("Draining {ev} from {cursor} upto {limit} entries (prev)");
-            if let Ok(cursor) = handle_service_event(
+            info!(
+                "Draining {ev} from {:?} upto {limit} entries (previous)",
+                cursor_type
+            );
+
+            if let Ok(cursor_type) = handle_service_event(
                 &ev,
                 tx.clone(),
-                Some(cursor.clone()),
+                Some(cursor_type.clone()),
                 limit,
                 ProcessLogType::ProcessPreviousLogs,
             ) {
-                last_cursor = cursor;
+                new_cursor_type = cursor_type
             }
         }
 
-        last_cursor
+        new_cursor_type
     });
 
     let new_cursor = handle.await.unwrap();
