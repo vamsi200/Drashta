@@ -7,16 +7,17 @@ use crate::parser::{
     read_journal_logs,
 };
 use anyhow::Result;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::{
     Router,
     response::sse::{Event, KeepAlive, Sse},
     routing::get,
 };
+use axum_extra::extract::Query;
 use futures::StreamExt;
 use futures::{Stream, stream};
 use log::{Level, debug, error, info, log_enabled};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, to_string};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -53,6 +54,10 @@ pub struct FilterEvent {
     #[serde(default, deserialize_with = "deserialize_cursor")]
     cursor: Option<CursorType>,
     limit: i32,
+    query: Option<String>,
+    event_type: Option<Vec<String>>,
+    timestamp_from: Option<String>,
+    timestamp_to: Option<String>,
 }
 
 fn format_thing(map: BTreeMap<String, String>) -> String {
@@ -73,24 +78,32 @@ pub async fn drain_older_logs(
         None => journal_units.clear(),
     }
     let limit = filter_event.0.limit;
+    let filter_keyword = filter_event.0.query;
 
     let cursor_type = filter_event.0.cursor.unwrap();
     let handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
         let mut new_cursor_type: Option<CursorType> = None;
+        let ref_event_type = filter_event
+            .0
+            .event_type
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
         for ev in journal_units {
             info!(
                 "Draining {ev} from {:?} upto {limit} entries (next)",
-                cursor_type
+                cursor_type,
             );
-
+            info!("Searched - {:?}", filter_keyword.clone());
             if let Ok(cursor_type) = handle_service_event(
                 &ev,
                 tx.clone(),
                 Some(cursor_type.clone()),
                 limit,
                 ProcessLogType::ProcessOlderLogs,
+                filter_keyword.clone(),
+                ref_event_type.clone(),
             ) {
                 new_cursor_type = cursor_type
             }
@@ -117,9 +130,6 @@ pub async fn drain_older_logs(
 pub async fn drain_upto_n_entries(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    use serde_json::{json, to_string};
-    use tokio::sync::mpsc;
-
     let (tx, mut rx) = mpsc::channel::<EventData>(1024);
     let mut journal_units = Journalunits::new();
 
@@ -131,12 +141,16 @@ pub async fn drain_upto_n_entries(
     let limit = filter_event.0.limit;
     let journal_units_clone = journal_units.clone();
     let tx_clone = tx.clone();
+    let filter_keyword = filter_event.0.query;
 
     let handle = tokio::task::spawn_blocking(move || {
         let mut last_cursor: Option<CursorType> = None;
+        let event_type = filter_event.0.event_type.unwrap();
+        let ref_event_type: Vec<&str> = event_type.iter().map(|s| s.as_str()).clone().collect();
 
         for ev in journal_units_clone {
             info!("Draining {ev} up to {limit} entries");
+            info!("Searched - {:?}", filter_keyword.clone());
 
             if let Ok(cursor) = handle_service_event(
                 &ev,
@@ -144,6 +158,8 @@ pub async fn drain_upto_n_entries(
                 None,
                 limit,
                 ProcessLogType::ProcessInitialLogs,
+                filter_keyword.clone(),
+                Some(ref_event_type.clone()),
             ) {
                 if let Some(cursor_type) = cursor {
                     last_cursor = Some(cursor_type);
@@ -185,25 +201,36 @@ pub async fn drain_previous_logs(
     let limit = filter_event.0.limit;
 
     let cursor_type = filter_event.0.cursor.unwrap();
+    let filter_keyword = filter_event.0.query;
 
     let handle = tokio::task::spawn_blocking(move || {
-        let tx = tx;
-        let mut new_cursor_type: Option<CursorType> = None;
+        let mut new_cursor_type = None;
+
+        let ref_event_type = filter_event
+            .0
+            .event_type
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
         for ev in journal_units {
             info!(
                 "Draining {ev} from {:?} upto {limit} entries (previous)",
                 cursor_type
             );
+            info!("Searched - {:?}", filter_keyword.clone());
 
-            if let Ok(cursor_type) = handle_service_event(
+            let result = handle_service_event(
                 &ev,
                 tx.clone(),
                 Some(cursor_type.clone()),
                 limit,
                 ProcessLogType::ProcessPreviousLogs,
-            ) {
-                new_cursor_type = cursor_type
+                filter_keyword.clone(),
+                ref_event_type.clone(),
+            );
+
+            if let Ok(cursor_type) = result {
+                new_cursor_type = cursor_type;
             }
         }
 
@@ -239,7 +266,13 @@ pub async fn receive_data(
 
     println!("Getting Live Events");
     std::thread::spawn(move || {
-        if let Err(e) = read_journal_logs(tx, Some(journal_units)) {
+        let ref_event_type = filter_event
+            .0
+            .event_type
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+        if let Err(e) = read_journal_logs(tx, Some(journal_units), ref_event_type) {
             eprintln!("Error: {e}");
         }
     });

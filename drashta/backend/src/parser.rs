@@ -5,10 +5,11 @@
 use crate::events;
 use crate::events::receive_data;
 use ahash::AHashMap;
-use aho_corasick::{AhoCorasick, AhoCorasickKind, dfa};
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use aho_corasick::{Input, Match, automaton::Automaton, dfa::DFA};
 use anyhow::Result;
 use axum::extract::State;
+use futures::future::Either;
 use log::{error, info};
 use memchr::memmem;
 use once_cell::sync::Lazy;
@@ -44,6 +45,19 @@ pub enum RawMsgType {
     Plain(String),
 }
 
+impl RawMsgType {
+    fn contains_bytes(&self, pat: &str) -> bool {
+        let ac = AhoCorasickBuilder::new()
+            .ascii_case_insensitive(true)
+            .build(&[pat])
+            .unwrap();
+
+        match self {
+            RawMsgType::Structured(map) => map.values().any(|v| ac.is_match(v)),
+            RawMsgType::Plain(s) => ac.is_match(s),
+        }
+    }
+}
 #[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
 pub struct Cursor {
     pub timestamp: String,
@@ -109,7 +123,7 @@ pub enum EventType {
     NewConnection,
 }
 
-type ParserFn = fn(entry_map: Entry) -> Option<EventData>;
+type ParserFn = fn(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData>;
 
 pub struct ServiceConfig {
     matches: Vec<(&'static str, &'static str)>,
@@ -118,14 +132,7 @@ pub struct ServiceConfig {
 
 pub static MANUAL_PARSE_EVENTS: Lazy<Vec<&'static str>> = Lazy::new(|| vec!["pkgmanager.events"]);
 
-macro_rules! insert_fields {
-    ($map:expr, $msg:expr, { $($key:expr => $idx:expr),+ $(,)? }) => {
-        $(
-            $map.insert($key.to_string(), rg_capture(&$msg, $idx)?);
-        )+
-    };
-}
-
+// TODO: Work on using Structs for function arguments.. I can't do this all day lil bro..
 macro_rules! handle_services {
     (
         $service_name:expr,
@@ -133,10 +140,13 @@ macro_rules! handle_services {
         $cursor:expr,
         $limit:expr,
         $processlogtype:expr,
+        $filter_event:expr,
+        $ev_type:expr,
         $($service:expr),* $(,)?
     ) => {{
         let cursor_opt: Option<String> = $cursor.clone();
-
+        let filter_opt: Option<String> = $filter_event.clone();
+        let ev_type: Option<Vec<&str>> = $ev_type;
         let result: Result<String, anyhow::Error> = match $service_name {
             $(
                 $service => process_service_logs(
@@ -145,6 +155,8 @@ macro_rules! handle_services {
                     cursor_opt.clone(),
                     $limit,
                     $processlogtype.clone(),
+                    filter_opt.clone(),
+                    ev_type
                 ),
             )*
             _ => Ok(String::new()),
@@ -158,7 +170,76 @@ pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
     msg.get(i).map(|m| m.as_str().to_string())
 }
 
-pub fn parse_sshd_logs(entry_map: Entry) -> Option<EventData> {
+pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
+    match ev {
+        // SSHD
+        "Success" => &["AUTH_SUCCESS"],
+        "Failure" => &["AUTH_FAILURE"],
+        "SessionOpened" => &["SESSION_OPENED"],
+        "SessionClosed" => &["SESSION_CLOSED"],
+        "ConnectionClosed" => &["CONNECTION_CLOSED"],
+        "TooManyAuthFailures" => &["TOO_MANY_AUTH"],
+        "Warning" => &["WARNING"],
+        "Info" => &["RECEIVED_DISCONNECT", "NEGOTIATION_FAILURE"],
+        "Other" => &["UNKNOWN"],
+        // SUDO
+        "IncorrectPassword" => &["INCORRECT_PASSWORD"],
+        "AuthError" => &["AUTH_ERROR"],
+        "AuthFailure" => &["AUTH_FAILURE"],
+        "CmdRun" => &["COMMAND_RUN"],
+        "SessionOpenedSudo" => &["SESSION_OPENED_SUDO", "SESSION_OPENED_SU"],
+        "SudoWarning" => &["SUDO_WARNING"],
+        "NotInSudoers" => &["NOT_IN_SUDOERS"],
+        // LOGIN
+        "LoginSuccess" => &["LOGIN_SUCCESS"],
+        "FailedLogin" => &["FAILED_LOGIN", "FAILED_LOGIN_TTY"],
+        "TooManyTries" => &["TOO_MANY_TRIES"],
+        "AuthCheckPass" => &["AUTH_CHECK_PASS"],
+        "AuthUserUnknown" => &["AUTH_USER_UNKNOWN"],
+        "FaillockUserUnknown" => &["FAILL0CK_USER_UNKNOWN"],
+        "NoLoginRefused" => &["NOLOGIN_REFUSED"],
+        "AccountExpired" => &["ACCOUNT_EXPIRED"],
+        "SessionOpenedLogin" => &["SESSION_OPENED"],
+        "SessionClosedLogin" => &["SESSION_CLOSED"],
+        // USER CREATION
+        "NewUser" => &["NEW_USER"],
+        "NewGroup" => &["NEW_GROUP"],
+        "GroupAddedEtcGroup" => &["GROUP_ADDED_ETC_GROUP"],
+        "GroupAddedEtcGshadow" => &["GROUP_ADDED_ETC_GSHADOW"],
+        // USER DELETION
+        "DeleteUser" => &["DELETE_USER"],
+        "DeleteUserHome" => &["DELETE_USER_HOME"],
+        "DeleteUserMail" => &["DELETE_USER_MAIL"],
+        "DeleteGroup" => &["DELETE_GROUP"],
+        // USER MODIFICATION
+        "ModifyUser" => &["MODIFY_USER"],
+        "ModifyGroup" => &["MODIFY_GROUP"],
+        "PasswdChange" => &["USER_PASSWD_CHANGE"],
+        "ShadowUpdated" => &["USER_SHADOW_UPDATED"],
+        // PKG EVENTS
+        "PkgInstalled" => &["INSTALLED"],
+        "PkgRemoved" => &["REMOVED"],
+        "PkgUpgraded" => &["UPGRADED"],
+        "PkgDowndraded" => &["DOWNGRADED"],
+        "PkgReinstalled" => &["REINSTALLED"],
+        // CRON
+        "CronCmd" => &["CRON_CMD"],
+        "CronReload" => &["CRON_RELOAD"],
+        "CronErrorBadCommand" => &["CRON_ERROR_BAD_COMMAND"],
+        "CronErrorBadMinute" => &["CRON_ERROR_BAD_MINUTE"],
+        "CronErrorOther" => &["CRON_ERROR_OTHER"],
+        "CronDenied" => &["CRON_DENIED"],
+        "CronSessionOpen" => &["CRON_SESSION_OPEN"],
+        "CronSessionClose" => &["CRON_SESSION_CLOSE"],
+        // NEW CONNECTION (if you want)
+        "NewConnection" => &["CONNECTION_CLOSED"],
+
+        // fallback
+        _ => &[],
+    }
+}
+
+pub fn parse_sshd_logs(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     static SSHD_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
             ("AUTH_SUCCESS", Regex::new(r"(?x)^Accepted\s+(\w+)\s+for\s+(\S+)\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+)(?:\s+ssh\d*)?\s*$").unwrap()),
@@ -183,97 +264,79 @@ pub fn parse_sshd_logs(entry_map: Entry) -> Option<EventData> {
     ]
     });
 
+    let msg = entry_map.get("MESSAGE")?;
+    let timestamp = entry_map
+        .get("SYSLOG_TIMESTAMP")
+        .cloned()
+        .unwrap_or_default();
+
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+
+        SSHD_REGEX
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect()
+    } else {
+        SSHD_REGEX.iter().collect()
+    };
+
     let mut map = AHashMap::new();
-    if let Some(s) = entry_map.get("MESSAGE") {
-        let mut timestamp = String::new();
-        if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
-            timestamp = tp.to_owned();
-        }
+    let s = entry_map.get("MESSAGE")?;
+    let timestamp = entry_map
+        .get("SYSLOG_TIMESTAMP")
+        .cloned()
+        .unwrap_or_default();
 
-        for (name, regex) in SSHD_REGEX.iter() {
-            if let Some(msg) = regex.captures(s) {
-                let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
-                    "AUTH_SUCCESS" => (
-                        Some(&[("user", 2), ("ip", 3), ("port", 4), ("method", 1)]),
-                        EventType::Success,
-                    ),
-                    "AUTH_FAILURE" => (
-                        Some(&[("method", 1), ("user", 2), ("ip", 3), ("port", 4)]),
-                        EventType::Failure,
-                    ),
+    for (name, regex) in filtered_regexes {
+        if let Some(caps) = regex.captures(s) {
+            let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                "AUTH_SUCCESS" => (
+                    Some(&[("user", 2), ("ip", 3), ("port", 4), ("method", 1)]),
+                    EventType::Success,
+                ),
+                "AUTH_FAILURE" => (
+                    Some(&[("method", 1), ("user", 2), ("ip", 3), ("port", 4)]),
+                    EventType::Failure,
+                ),
+                "SESSION_OPENED" => (Some(&[("user", 1)]), EventType::SessionOpened),
+                "SESSION_CLOSED" => (Some(&[("user", 1)]), EventType::SessionClosed),
+                "CONNECTION_CLOSED" => (
+                    Some(&[("user", 1), ("ip", 2), ("port", 3)]),
+                    EventType::ConnectionClosed,
+                ),
+                "WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
+                "TOO_MANY_AUTH" => (Some(&[("user", 1)]), EventType::TooManyAuthFailures),
+                _ => (Some(&[("msg", 1)]), EventType::Other),
+            };
 
-                    "SESSION_OPENED" => {
-                        (Some(&[("user", 1), ("uid", 2)]), EventType::SessionOpened)
-                    }
-
-                    "SESSION_CLOSED" => (Some(&[("user", 1)]), EventType::SessionClosed),
-
-                    "CONNECTION_CLOSED" => (
-                        Some(&[("user", 1), ("ip", 2), ("port", 3), ("msg", 4)]),
-                        EventType::ConnectionClosed,
-                    ),
-
-                    "WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
-                    "UNKNOWN" => (Some(&[("msg", 1)]), EventType::Other),
-
-                    "RECEIVED_DISCONNECT" => (
-                        Some(&[("ip", 1), ("port", 2), ("code", 3), ("msg", 4)]),
-                        EventType::Other,
-                    ),
-
-                    "NEGOTIATION_FAILURE" => (
-                        Some(&[("ip", 1), ("port", 2), ("details", 3)]),
-                        EventType::Other,
-                    ),
-
-                    "TOO_MANY_AUTH" => (
-                        Some(&[("user", 1), ("ip", 2), ("port", 3)]),
-                        EventType::TooManyAuthFailures,
-                    ),
-
-                    _ => (None, EventType::Other),
-                };
-
-                if let Some(fields) = data {
-                    for &(name, idx) in fields {
-                        if let Some(m) = msg.get(idx) {
-                            map.insert(name.to_string(), m.as_str().to_string());
-                        }
+            if let Some(fields) = data {
+                for &(fname, idx) in fields {
+                    if let Some(m) = caps.get(idx) {
+                        map.insert(fname.to_string(), m.as_str().to_string());
                     }
                 }
-
-                return Some(EventData {
-                    timestamp,
-                    service: Service::Sshd,
-                    data: map,
-                    event_type,
-                    raw_msg: RawMsgType::Structured(entry_map),
-                });
             }
-        }
 
-        for rgx in PROTOCOL_MISMATCH.iter() {
-            if let Some(msg) = rgx.captures(s) {
-                insert_fields!(map, msg, {
-                    "ip" => 2,
-                    "port" => 3,
-                });
-
-                let ev = EventData {
-                    timestamp,
-                    service: Service::Sshd,
-                    data: map,
-                    event_type: EventType::Info,
-                    raw_msg: RawMsgType::Structured(entry_map),
-                };
-                return Some(ev);
-            }
+            return Some(EventData {
+                timestamp,
+                service: Service::Sshd,
+                data: map,
+                event_type,
+                raw_msg: RawMsgType::Structured(entry_map),
+            });
         }
     }
     None
 }
 
-pub fn parse_sudo_login_attempts(entry_map: Entry) -> Option<EventData> {
+pub fn parse_sudo_login_attempts(
+    entry_map: Entry,
+    ev_type: Option<Vec<&str>>,
+) -> Option<EventData> {
     static SUDO_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
             ("COMMAND_RUN", Regex::new(r"(?x)^(\w+)\s+:\s+TTY=(\S+)\s+;\s+PWD=(\S+)\s+;\s+USER=(\S+)\s+;\s+COMMAND=(/usr/bin/su.*)$").unwrap()),
@@ -288,6 +351,20 @@ pub fn parse_sudo_login_attempts(entry_map: Entry) -> Option<EventData> {
         ]
     });
 
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+
+        SUDO_REGEX
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect()
+    } else {
+        SUDO_REGEX.iter().collect()
+    };
+
     let mut map = AHashMap::new();
     if let Some(s) = entry_map.get("MESSAGE") {
         let mut timestamp = String::new();
@@ -296,7 +373,7 @@ pub fn parse_sudo_login_attempts(entry_map: Entry) -> Option<EventData> {
         }
         let trim_msg = s.trim();
 
-        for (name, regex) in SUDO_REGEX.iter() {
+        for (name, regex) in filtered_regexes.iter() {
             if let Some(msg) = regex.captures(trim_msg) {
                 let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                     "COMMAND_RUN" => (
@@ -403,7 +480,7 @@ pub fn parse_sudo_login_attempts(entry_map: Entry) -> Option<EventData> {
     None
 }
 
-pub fn parse_login_attempts(entry_map: Entry) -> Option<EventData> {
+pub fn parse_login_attempts(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     static LOGIN_REGEXES: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
         ("AUTH_FAILURE", Regex::new(r"^pam_unix\(login:auth\): authentication failure; logname=(\S+) uid=(\d+) euid=(\d+) tty=(\S+) ruser=(\S*) rhost=(\S*)$").unwrap()),
@@ -423,7 +500,21 @@ pub fn parse_login_attempts(entry_map: Entry) -> Option<EventData> {
 
     let mut map = AHashMap::new();
 
-    for (name, regex) in LOGIN_REGEXES.iter() {
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+
+        LOGIN_REGEXES
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect()
+    } else {
+        LOGIN_REGEXES.iter().collect()
+    };
+
+    for (name, regex) in filtered_regexes.iter() {
         let mut timestamp = String::new();
         if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
             timestamp = tp.to_owned();
@@ -493,10 +584,10 @@ pub fn parse_login_attempts(entry_map: Entry) -> Option<EventData> {
     }
     None
 }
-pub fn parse_kernel_events(map: Entry) -> Option<EventData> {
+pub fn parse_kernel_events(map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     todo!()
 }
-pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
+pub fn parse_user_change_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     static USER_CREATION_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
             ("NEW_USER", Regex::new(r"^new user: name=(\S+), UID=(\d+), GID=(\d+), home=(\S+), shell=(\S+), from=(\S+)$").unwrap()),
@@ -551,6 +642,28 @@ pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
         ]
     });
 
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+
+        let filtered: Vec<_> = USER_CREATION_REGEX
+            .iter()
+            .chain(USER_DELETION_REGEX.iter())
+            .chain(USER_MODIFICATION_REGEX.iter())
+            .filter(|(name, _)| names.contains(name))
+            .collect();
+        filtered
+    } else {
+        let filtered: Vec<_> = USER_CREATION_REGEX
+            .iter()
+            .chain(USER_DELETION_REGEX.iter())
+            .chain(USER_MODIFICATION_REGEX.iter())
+            .collect();
+        filtered
+    };
+
     let mut map = AHashMap::new();
     let mut timestamp = String::new();
     if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
@@ -558,7 +671,7 @@ pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
     }
 
     if let Some(msg) = entry_map.get("MESSAGE") {
-        for (name, regex) in USER_CREATION_REGEX.iter() {
+        for (name, regex) in filtered_regexes.iter() {
             if let Some(s) = regex.captures(msg) {
                 let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                     "NEW_USER" => (
@@ -592,7 +705,7 @@ pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
                     raw_msg: RawMsgType::Structured(entry_map),
                 });
             }
-            for (name, regex) in USER_DELETION_REGEX.iter() {
+            for (name, regex) in filtered_regexes.iter() {
                 if let Some(s) = regex.captures(msg) {
                     let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                         "DELETE_USER" => (
@@ -629,7 +742,7 @@ pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
                 }
             }
 
-            for (name, regex) in USER_MODIFICATION_REGEX.iter() {
+            for (name, regex) in filtered_regexes.iter() {
                 if let Some(s) = regex.captures(msg) {
                     let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                         "MODIFY_USER" => (Some(&[("name", 1)]), EventType::ModifyUser),
@@ -660,7 +773,7 @@ pub fn parse_user_change_events(entry_map: Entry) -> Option<EventData> {
     }
     None
 }
-pub fn parse_pkg_events(content: String) -> Option<EventData> {
+pub fn parse_pkg_events(content: String, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     static PKG_EVENTS_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
             (
@@ -688,7 +801,21 @@ pub fn parse_pkg_events(content: String) -> Option<EventData> {
     });
     let mut map = AHashMap::new();
 
-    for (name, regex) in PKG_EVENTS_REGEX.iter() {
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+
+        PKG_EVENTS_REGEX
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect()
+    } else {
+        PKG_EVENTS_REGEX.iter().collect()
+    };
+
+    for (name, regex) in filtered_regexes.iter() {
         if let Some(s) = regex.captures(&content) {
             let timestamp = s.get(1).unwrap().as_str().to_string();
             let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
@@ -728,7 +855,10 @@ pub fn parse_pkg_events(content: String) -> Option<EventData> {
     None
 }
 
-pub fn parse_config_change_events(entry_map: Entry) -> Option<EventData> {
+pub fn parse_config_change_events(
+    entry_map: Entry,
+    ev_type: Option<Vec<&str>>,
+) -> Option<EventData> {
     static CRON_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
             (
@@ -768,13 +898,28 @@ pub fn parse_config_change_events(entry_map: Entry) -> Option<EventData> {
             ),
         ]
     });
+
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+
+        CRON_REGEX
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect()
+    } else {
+        CRON_REGEX.iter().collect()
+    };
+
     let mut map = AHashMap::new();
     let mut timestamp = String::new();
     if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
         timestamp = tp.trim().to_owned();
     }
 
-    for (name, regex) in CRON_REGEX.iter() {
+    for (name, regex) in filtered_regexes.iter() {
         if let Some(s) = entry_map.get("MESSAGE") {
             let trimmed_msg = s.trim();
             if let Some(msg) = regex.captures(trimmed_msg) {
@@ -818,10 +963,10 @@ pub fn parse_config_change_events(entry_map: Entry) -> Option<EventData> {
     }
     None
 }
-pub fn parse_network_events(entry_map: Entry) -> Option<EventData> {
+pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     todo!()
 }
-pub fn parse_firewalld_events(map: Entry) -> Option<EventData> {
+pub fn parse_firewalld_events(map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     todo!()
 }
 
@@ -860,7 +1005,7 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
         "firewall.events",
         ServiceConfig {
             matches: vec![("_SYSTEMD_UNIT", "firewalld.service")],
-            parser: |_d| None, // TODO
+            parser: |_d, _s| None, // TODO
         },
     );
 
@@ -908,7 +1053,14 @@ pub fn process_upto_n_entries(
     tx: tokio::sync::mpsc::Sender<EventData>,
     limit: i32,
     config: &ServiceConfig,
+    filter: Option<String>,
+    event_type: Option<Vec<&str>>,
 ) -> Result<String> {
+    let mut keyword = String::new();
+    if let Some(filter) = filter {
+        keyword = filter;
+    }
+
     for (field, value) in &config.matches {
         journal.match_add(field, value.to_string())?;
         journal.match_or()?;
@@ -918,7 +1070,10 @@ pub fn process_upto_n_entries(
     let mut count = 0;
     while count < limit {
         if let Some(data) = journal.next_entry()? {
-            if let Some(ev) = (config.parser)(data) {
+            if let Some(ev) = (config.parser)(data, event_type.clone()) {
+                if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                    continue;
+                }
                 if tx.blocking_send(ev).is_err() {
                     error!("Event Dropped!");
                 }
@@ -939,13 +1094,19 @@ pub fn process_older_logs(
     limit: i32,
     config: &ServiceConfig,
     cursor: String,
+    filter: Option<String>,
+    ev_type: Option<Vec<&str>>,
 ) -> Result<String> {
+    let mut keyword = String::new();
+    if let Some(filter) = filter {
+        keyword = filter;
+    }
+
     for (field, value) in &config.matches {
         journal.match_add(field, value.to_string())?;
         journal.match_or()?;
     }
     journal.seek_cursor(&cursor)?;
-
     journal.next_entry()?;
 
     let mut count = 0;
@@ -954,7 +1115,10 @@ pub fn process_older_logs(
     while count < limit {
         match journal.next_entry()? {
             Some(data) => {
-                if let Some(ev) = (config.parser)(data) {
+                if let Some(ev) = (config.parser)(data, ev_type.clone()) {
+                    if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                        continue;
+                    }
                     if tx.blocking_send(ev).is_err() {
                         error!("Event Dropped!");
                     }
@@ -975,7 +1139,13 @@ pub fn process_previous_logs(
     limit: i32,
     config: &ServiceConfig,
     cursor: String,
+    filter: Option<String>,
+    ev_type: Option<Vec<&str>>,
 ) -> Result<String> {
+    let mut keyword = String::new();
+    if let Some(filter) = filter {
+        keyword = filter;
+    }
     for (i, (field, value)) in config.matches.iter().enumerate() {
         journal.match_add(field, value.to_string())?;
         if i < config.matches.len() - 1 {
@@ -990,7 +1160,10 @@ pub fn process_previous_logs(
     while count < limit {
         match journal.previous_entry()? {
             Some(data) => {
-                if let Some(ev) = (config.parser)(data) {
+                if let Some(ev) = (config.parser)(data, ev_type.clone()) {
+                    if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                        continue;
+                    }
                     if tx.blocking_send(ev).is_err() {
                         error!("Event Dropped!");
                     }
@@ -1012,6 +1185,8 @@ pub fn process_service_logs(
     cursor: Option<String>,
     limit: i32,
     processlogtype: ProcessLogType,
+    filter: Option<String>,
+    ev_type: Option<Vec<&str>>,
 ) -> Result<String, anyhow::Error> {
     let configs = get_service_configs();
 
@@ -1025,13 +1200,13 @@ pub fn process_service_logs(
 
     let new_cursor = match (cursor, processlogtype) {
         (Some(cursor), ProcessLogType::ProcessOlderLogs) => {
-            process_older_logs(s, tx.clone(), limit, config, cursor)?
+            process_older_logs(s, tx.clone(), limit, config, cursor, filter, ev_type)?
         }
         (Some(cursor), ProcessLogType::ProcessPreviousLogs) => {
-            process_previous_logs(s, tx.clone(), limit, config, cursor)?
+            process_previous_logs(s, tx.clone(), limit, config, cursor, filter, ev_type)?
         }
         (None, ProcessLogType::ProcessInitialLogs) => {
-            process_upto_n_entries(s, tx.clone(), limit, config)?
+            process_upto_n_entries(s, tx.clone(), limit, config, filter, ev_type)?
         }
         _ => String::new(),
     };
@@ -1043,7 +1218,14 @@ pub fn process_manual_events_upto_n(
     tx: tokio::sync::mpsc::Sender<EventData>,
     service_name: &str,
     limit: i32,
+    filter: Option<String>,
+    ev_type: Option<Vec<&str>>,
 ) -> Result<Option<Cursor>> {
+    let mut keyword = String::new();
+    if let Some(filter) = filter {
+        keyword = filter;
+    }
+
     let mut cursor: Option<Cursor> = None;
 
     if service_name == "pkgmanager.events" {
@@ -1057,7 +1239,10 @@ pub fn process_manual_events_upto_n(
         while reader.read_line(&mut buf).unwrap() > 0 && count < limit {
             let offset = reader.stream_position()?;
             line_count += 1;
-            if let Some(ev) = parse_pkg_events(buf.trim_end().to_string()) {
+            if let Some(ev) = parse_pkg_events(buf.trim_end().to_string(), ev_type.clone()) {
+                if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                    continue;
+                }
                 if tx.blocking_send(ev.clone()).is_err() {
                     error!("Event Dropped!");
                 }
@@ -1089,7 +1274,13 @@ pub fn process_manual_events_next(
     service_name: &str,
     cursor: Cursor,
     limit: i32,
+    filter: Option<String>,
+    ev_type: Option<Vec<&str>>,
 ) -> Result<Option<Cursor>> {
+    let mut keyword = String::new();
+    if let Some(filter) = filter {
+        keyword = filter;
+    }
     let mut new_cursor: Option<Cursor> = None;
     let mut count = 0;
 
@@ -1122,7 +1313,10 @@ pub fn process_manual_events_next(
                 continue;
             }
 
-            if let Some(ev) = parse_pkg_events(line.trim_end().to_string()) {
+            if let Some(ev) = parse_pkg_events(line.trim_end().to_string(), ev_type.clone()) {
+                if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                    continue;
+                }
                 if tx.blocking_send(ev.clone()).is_err() {
                     error!("Event Dropped!");
                     break;
@@ -1157,9 +1351,14 @@ pub fn process_manual_events_previous(
     service_name: &str,
     cursor: Cursor,
     limit: i32,
+    filter: Option<String>,
+    ev_type: Option<Vec<&str>>,
 ) -> Result<Option<Cursor>> {
     let mut new_cursor: Option<Cursor> = None;
-
+    let mut keyword = String::new();
+    if let Some(filter) = filter {
+        keyword = filter;
+    }
     let chunk_size = 8192;
     if service_name == "pkgmanager.events" {
         let patterns = [cursor.timestamp.as_bytes(), cursor.data.as_bytes()];
@@ -1174,7 +1373,10 @@ pub fn process_manual_events_previous(
                 if count >= limit {
                     break;
                 }
-                if let Some(ev) = parse_pkg_events(line.trim_end().to_string()) {
+                if let Some(ev) = parse_pkg_events(line.trim_end().to_string(), ev_type.clone()) {
+                    if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                        continue;
+                    }
                     if tx.blocking_send(ev.clone()).is_err() {
                         continue;
                     } else {
@@ -1293,32 +1495,49 @@ pub fn handle_service_event(
     cursor: Option<CursorType>,
     limit: i32,
     processlogtype: ProcessLogType,
+    filter: Option<String>,
+    ev_type: Option<Vec<&str>>,
 ) -> Result<Option<CursorType>> {
     let mut cursor_type: Option<CursorType> = None;
-
     let is_manual_service = MANUAL_PARSE_EVENTS.iter().any(|&ev| ev == service_name);
 
     if is_manual_service {
         match processlogtype {
             ProcessLogType::ProcessInitialLogs => {
-                if let Some(c) = process_manual_events_upto_n(tx.clone(), service_name, limit)? {
+                if let Some(c) = process_manual_events_upto_n(
+                    tx.clone(),
+                    service_name,
+                    limit,
+                    filter,
+                    ev_type.clone(),
+                )? {
                     cursor_type = Some(CursorType::Manual(c));
                 }
             }
             ProcessLogType::ProcessOlderLogs => {
                 if let Some(CursorType::Manual(c)) = cursor {
-                    if let Some(next_c) =
-                        process_manual_events_next(tx.clone(), service_name, c, limit)?
-                    {
+                    if let Some(next_c) = process_manual_events_next(
+                        tx.clone(),
+                        service_name,
+                        c,
+                        limit,
+                        filter,
+                        ev_type.clone(),
+                    )? {
                         cursor_type = Some(CursorType::Manual(next_c));
                     }
                 }
             }
             ProcessLogType::ProcessPreviousLogs => {
                 if let Some(CursorType::Manual(c)) = cursor {
-                    if let Some(prev_c) =
-                        process_manual_events_previous(tx.clone(), service_name, c, limit)?
-                    {
+                    if let Some(prev_c) = process_manual_events_previous(
+                        tx.clone(),
+                        service_name,
+                        c,
+                        limit,
+                        filter,
+                        ev_type.clone(),
+                    )? {
                         cursor_type = Some(CursorType::Manual(prev_c));
                     }
                 }
@@ -1333,6 +1552,8 @@ pub fn handle_service_event(
                     Some(c),
                     limit,
                     processlogtype,
+                    filter,
+                    ev_type.clone(),
                     "sshd.events",
                     "sudo.events",
                     "login.events",
@@ -1347,13 +1568,15 @@ pub fn handle_service_event(
                 }
             }
             None => {
-                info!("Invoked (initial)!");
+                info!("Invoked initial drain!");
                 if let Ok(new_c) = handle_services!(
                     service_name,
                     tx,
                     None,
                     limit,
                     processlogtype,
+                    filter,
+                    ev_type.clone(),
                     "sshd.events",
                     "sudo.events",
                     "login.events",
@@ -1373,9 +1596,24 @@ pub fn handle_service_event(
     Ok(cursor_type)
 }
 
+pub fn search_logs(input: EventData, search_query: &str) -> Result<()> {
+    let patterns = &[search_query];
+    let ac = AhoCorasick::new(patterns).unwrap();
+    let data = input.raw_msg;
+    match data {
+        RawMsgType::Plain(ref map) => {
+            for mat in ac.find_iter(map.as_str()) {
+                info!("Found in line - {:?}", map);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 pub fn read_journal_logs(
     tx: tokio::sync::broadcast::Sender<EventData>,
     unit: Option<Vec<String>>,
+    ev_type: Option<Vec<&str>>,
 ) -> Result<()> {
     let mut s: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
@@ -1402,7 +1640,7 @@ pub fn read_journal_logs(
                 s.seek_realtime_usec(now)?;
                 loop {
                     while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_sshd_logs(data) {
+                        if let Some(ev) = parse_sshd_logs(data, ev_type.clone()) {
                             let _ = tx.send(ev);
                         }
                     }
