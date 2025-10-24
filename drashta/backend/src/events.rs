@@ -3,8 +3,8 @@
 #![allow(unused_imports)]
 
 use crate::parser::{
-    Cursor, CursorType, Entry, EventData, ProcessLogType, deserialize_cursor, handle_service_event,
-    read_journal_logs,
+    Cursor, CursorType, Entry, EventData, EventType, ProcessLogType, deserialize_cursor,
+    handle_service_event, read_journal_logs,
 };
 use anyhow::Result;
 use axum::extract::State;
@@ -142,11 +142,14 @@ pub async fn drain_upto_n_entries(
     let journal_units_clone = journal_units.clone();
     let tx_clone = tx.clone();
     let filter_keyword = filter_event.0.query;
-
     let handle = tokio::task::spawn_blocking(move || {
+        let ref_event_type: Option<Vec<&str>> = filter_event
+            .0
+            .event_type
+            .as_ref()
+            .map(|s| s.iter().map(|s| s.as_str()).collect());
+
         let mut last_cursor: Option<CursorType> = None;
-        let event_type = filter_event.0.event_type.unwrap();
-        let ref_event_type: Vec<&str> = event_type.iter().map(|s| s.as_str()).clone().collect();
 
         for ev in journal_units_clone {
             info!("Draining {ev} up to {limit} entries");
@@ -159,7 +162,7 @@ pub async fn drain_upto_n_entries(
                 limit,
                 ProcessLogType::ProcessInitialLogs,
                 filter_keyword.clone(),
-                Some(ref_event_type.clone()),
+                ref_event_type.clone(),
             ) {
                 if let Some(cursor_type) = cursor {
                     last_cursor = Some(cursor_type);
@@ -206,11 +209,11 @@ pub async fn drain_previous_logs(
     let handle = tokio::task::spawn_blocking(move || {
         let mut new_cursor_type = None;
 
-        let ref_event_type = filter_event
+        let ref_event_type: Option<Vec<&str>> = filter_event
             .0
             .event_type
             .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            .map(|s| s.iter().map(|s| s.as_str()).collect());
 
         for ev in journal_units {
             info!(
