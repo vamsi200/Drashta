@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use std::result::Result::Ok;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -130,33 +131,62 @@ pub struct ServiceConfig {
     parser: ParserFn,
 }
 
+#[derive(Clone)]
+pub struct ParserFuncArgs<'a> {
+    service_name: &'a str,
+    tx: tokio::sync::mpsc::Sender<EventData>,
+    limit: i32,
+    processlogtype: ProcessLogType,
+    filter: Option<String>,
+    ev_type: Option<Vec<&'a str>>,
+    journal: Arc<Mutex<Journal>>,
+    cursor: Option<CursorType>,
+}
+
+impl<'a> ParserFuncArgs<'a> {
+    pub fn new(
+        service_name: &'a str,
+        tx: tokio::sync::mpsc::Sender<EventData>,
+        limit: i32,
+        processlogtype: ProcessLogType,
+        filter: Option<String>,
+        ev_type: Option<Vec<&'a str>>,
+        cursor: Option<CursorType>,
+    ) -> Self {
+        let journal: Journal = journal::OpenOptions::default()
+            .all_namespaces(true)
+            .open()
+            .expect("Couldn't create new Journal");
+        Self {
+            cursor,
+            service_name,
+            tx,
+            limit,
+            processlogtype,
+            filter,
+            ev_type,
+            journal: Arc::new(Mutex::new(journal)),
+        }
+    }
+}
+
 pub static MANUAL_PARSE_EVENTS: Lazy<Vec<&'static str>> = Lazy::new(|| vec!["pkgmanager.events"]);
 
 // TODO: Work on using Structs for function arguments.. I can't do this all day lil bro..
 macro_rules! handle_services {
     (
-        $service_name:expr,
-        $tx:expr,
+        $opts:expr,
         $cursor:expr,
-        $limit:expr,
-        $processlogtype:expr,
-        $filter_event:expr,
-        $ev_type:expr,
         $($service:expr),* $(,)?
     ) => {{
-        let cursor_opt: Option<String> = $cursor.clone();
-        let filter_opt: Option<String> = $filter_event.clone();
-        let ev_type: Option<Vec<&str>> = $ev_type;
-        let result: Result<String, anyhow::Error> = match $service_name {
+        let opts = $opts.clone();
+        let service_name = opts.service_name;
+        let cursor: Option<String> = $cursor;
+        let result: Result<String, anyhow::Error> = match service_name {
             $(
                 $service => process_service_logs(
-                    $service,
-                    $tx.clone(),
-                    cursor_opt.clone(),
-                    $limit,
-                    $processlogtype.clone(),
-                    filter_opt.clone(),
-                    ev_type
+                    $opts,
+                    $cursor
                 ),
             )*
             _ => Ok(String::new()),
@@ -231,10 +261,8 @@ pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
         "CronDenied" => &["CRON_DENIED"],
         "CronSessionOpen" => &["CRON_SESSION_OPEN"],
         "CronSessionClose" => &["CRON_SESSION_CLOSE"],
-        // NEW CONNECTION (if you want)
         "NewConnection" => &["CONNECTION_CLOSED"],
 
-        // fallback
         _ => &[],
     }
 }
@@ -584,9 +612,11 @@ pub fn parse_login_attempts(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
     }
     None
 }
+
 pub fn parse_kernel_events(map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     todo!()
 }
+
 pub fn parse_user_change_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     static USER_CREATION_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
@@ -773,6 +803,7 @@ pub fn parse_user_change_events(entry_map: Entry, ev_type: Option<Vec<&str>>) ->
     }
     None
 }
+
 pub fn parse_pkg_events(content: String, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     static PKG_EVENTS_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
@@ -1048,14 +1079,13 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
     map
 }
 
-pub fn process_upto_n_entries(
-    mut journal: Journal,
-    tx: tokio::sync::mpsc::Sender<EventData>,
-    limit: i32,
-    config: &ServiceConfig,
-    filter: Option<String>,
-    event_type: Option<Vec<&str>>,
-) -> Result<String> {
+pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> Result<String> {
+    let filter = opts.filter;
+    let limit = opts.limit;
+    let tx = opts.tx;
+    let mut journal = opts.journal.lock().unwrap();
+    let event_type = opts.ev_type;
+
     let mut keyword = String::new();
     if let Some(filter) = filter {
         keyword = filter;
@@ -1089,14 +1119,17 @@ pub fn process_upto_n_entries(
 }
 
 pub fn process_older_logs(
-    mut journal: Journal,
-    tx: tokio::sync::mpsc::Sender<EventData>,
-    limit: i32,
+    opts: ParserFuncArgs,
+    ev_type: Option<Vec<&str>>,
     config: &ServiceConfig,
     cursor: String,
-    filter: Option<String>,
-    ev_type: Option<Vec<&str>>,
 ) -> Result<String> {
+    let filter = opts.filter;
+    let limit = opts.limit;
+    let tx = opts.tx;
+    let mut journal = opts.journal.lock().unwrap();
+    let event_type = opts.ev_type;
+
     let mut keyword = String::new();
     if let Some(filter) = filter {
         keyword = filter;
@@ -1134,14 +1167,16 @@ pub fn process_older_logs(
 }
 
 pub fn process_previous_logs(
-    mut journal: Journal,
-    tx: tokio::sync::mpsc::Sender<EventData>,
-    limit: i32,
+    opts: ParserFuncArgs,
     config: &ServiceConfig,
     cursor: String,
-    filter: Option<String>,
-    ev_type: Option<Vec<&str>>,
 ) -> Result<String> {
+    let filter = opts.filter;
+    let limit = opts.limit;
+    let tx = opts.tx;
+    let event_type = opts.ev_type;
+    let mut journal = opts.journal.lock().unwrap();
+
     let mut keyword = String::new();
     if let Some(filter) = filter {
         keyword = filter;
@@ -1160,7 +1195,7 @@ pub fn process_previous_logs(
     while count < limit {
         match journal.previous_entry()? {
             Some(data) => {
-                if let Some(ev) = (config.parser)(data, ev_type.clone()) {
+                if let Some(ev) = (config.parser)(data, event_type.clone()) {
                     if !ev.raw_msg.contains_bytes(keyword.as_str()) {
                         continue;
                     }
@@ -1180,16 +1215,13 @@ pub fn process_previous_logs(
 //TODO: Include the live part here as well
 //Add the PkgManager impl
 pub fn process_service_logs(
-    service_name: &str,
-    tx: tokio::sync::mpsc::Sender<EventData>,
+    opts: ParserFuncArgs,
     cursor: Option<String>,
-    limit: i32,
-    processlogtype: ProcessLogType,
-    filter: Option<String>,
-    ev_type: Option<Vec<&str>>,
 ) -> Result<String, anyhow::Error> {
     let configs = get_service_configs();
-
+    let event_type = opts.ev_type.clone();
+    let service_name = opts.service_name;
+    let processlogtype = opts.processlogtype.clone();
     let Some(config) = configs.get(service_name) else {
         ::anyhow::bail!("Unknown Service: {}", service_name);
     };
@@ -1200,27 +1232,26 @@ pub fn process_service_logs(
 
     let new_cursor = match (cursor, processlogtype) {
         (Some(cursor), ProcessLogType::ProcessOlderLogs) => {
-            process_older_logs(s, tx.clone(), limit, config, cursor, filter, ev_type)?
+            process_older_logs(opts, event_type, config, cursor)?
         }
         (Some(cursor), ProcessLogType::ProcessPreviousLogs) => {
-            process_previous_logs(s, tx.clone(), limit, config, cursor, filter, ev_type)?
+            process_previous_logs(opts, config, cursor)?
         }
-        (None, ProcessLogType::ProcessInitialLogs) => {
-            process_upto_n_entries(s, tx.clone(), limit, config, filter, ev_type)?
-        }
+        (None, ProcessLogType::ProcessInitialLogs) => process_upto_n_entries(opts, config)?,
         _ => String::new(),
     };
 
     Ok(new_cursor)
 }
 
-pub fn process_manual_events_upto_n(
-    tx: tokio::sync::mpsc::Sender<EventData>,
-    service_name: &str,
-    limit: i32,
-    filter: Option<String>,
-    ev_type: Option<Vec<&str>>,
-) -> Result<Option<Cursor>> {
+pub fn process_manual_events_upto_n(opts: ParserFuncArgs) -> Result<Option<Cursor>> {
+    let service_name = opts.service_name;
+    let filter = opts.filter.clone();
+    let ev_type = opts.ev_type.clone();
+    let cursor = opts.cursor.clone();
+    let limit = opts.limit;
+    let tx = opts.tx.clone();
+
     let mut keyword = String::new();
     if let Some(filter) = filter {
         keyword = filter;
@@ -1269,14 +1300,13 @@ pub fn process_manual_events_upto_n(
     Ok(cursor)
 }
 
-pub fn process_manual_events_next(
-    tx: tokio::sync::mpsc::Sender<EventData>,
-    service_name: &str,
-    cursor: Cursor,
-    limit: i32,
-    filter: Option<String>,
-    ev_type: Option<Vec<&str>>,
-) -> Result<Option<Cursor>> {
+pub fn process_manual_events_next(opts: ParserFuncArgs, cursor: Cursor) -> Result<Option<Cursor>> {
+    let service_name = opts.service_name;
+    let filter = opts.filter.clone();
+    let ev_type = opts.ev_type.clone();
+    let limit = opts.limit;
+    let tx = opts.tx.clone();
+
     let mut keyword = String::new();
     if let Some(filter) = filter {
         keyword = filter;
@@ -1347,13 +1377,14 @@ pub fn process_manual_events_next(
 }
 
 pub fn process_manual_events_previous(
-    tx: tokio::sync::mpsc::Sender<EventData>,
-    service_name: &str,
+    opts: ParserFuncArgs,
     cursor: Cursor,
-    limit: i32,
-    filter: Option<String>,
-    ev_type: Option<Vec<&str>>,
 ) -> Result<Option<Cursor>> {
+    let service_name = opts.service_name;
+    let filter = opts.filter.clone();
+    let ev_type = opts.ev_type.clone();
+    let limit = opts.limit;
+    let tx = opts.tx.clone();
     let mut new_cursor: Option<Cursor> = None;
     let mut keyword = String::new();
     if let Some(filter) = filter {
@@ -1489,55 +1520,35 @@ where
 
 // Should also think to capture command failures
 //TODO: Need to check the name's of the services beacuse there are different on different distros
-pub fn handle_service_event(
-    service_name: &str,
-    tx: tokio::sync::mpsc::Sender<EventData>,
-    cursor: Option<CursorType>,
-    limit: i32,
-    processlogtype: ProcessLogType,
-    filter: Option<String>,
-    ev_type: Option<Vec<&str>>,
-) -> Result<Option<CursorType>> {
+pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> {
     let mut cursor_type: Option<CursorType> = None;
+    let service_name = opts.service_name;
+    let filter = opts.filter.clone();
+    let ev_type = opts.ev_type.clone();
+    let cursor = opts.cursor.clone();
+    let processlogtype = opts.processlogtype.clone();
+    let limit = opts.limit;
+    let tx = opts.tx.clone();
     let is_manual_service = MANUAL_PARSE_EVENTS.iter().any(|&ev| ev == service_name);
+    let configs = get_service_configs();
 
     if is_manual_service {
         match processlogtype {
             ProcessLogType::ProcessInitialLogs => {
-                if let Some(c) = process_manual_events_upto_n(
-                    tx.clone(),
-                    service_name,
-                    limit,
-                    filter,
-                    ev_type.clone(),
-                )? {
+                if let Some(c) = process_manual_events_upto_n(opts)? {
                     cursor_type = Some(CursorType::Manual(c));
                 }
             }
             ProcessLogType::ProcessOlderLogs => {
                 if let Some(CursorType::Manual(c)) = cursor {
-                    if let Some(next_c) = process_manual_events_next(
-                        tx.clone(),
-                        service_name,
-                        c,
-                        limit,
-                        filter,
-                        ev_type.clone(),
-                    )? {
+                    if let Some(next_c) = process_manual_events_next(opts, c)? {
                         cursor_type = Some(CursorType::Manual(next_c));
                     }
                 }
             }
             ProcessLogType::ProcessPreviousLogs => {
                 if let Some(CursorType::Manual(c)) = cursor {
-                    if let Some(prev_c) = process_manual_events_previous(
-                        tx.clone(),
-                        service_name,
-                        c,
-                        limit,
-                        filter,
-                        ev_type.clone(),
-                    )? {
+                    if let Some(prev_c) = process_manual_events_previous(opts, c)? {
                         cursor_type = Some(CursorType::Manual(prev_c));
                     }
                 }
@@ -1547,13 +1558,8 @@ pub fn handle_service_event(
         match cursor {
             Some(CursorType::Journal(c)) => {
                 if let Ok(new_c) = handle_services!(
-                    service_name,
-                    tx,
-                    Some(c),
-                    limit,
-                    processlogtype,
-                    filter,
-                    ev_type.clone(),
+                    opts.clone(),
+                    Some(c.clone()),
                     "sshd.events",
                     "sudo.events",
                     "login.events",
@@ -1570,13 +1576,8 @@ pub fn handle_service_event(
             None => {
                 info!("Invoked initial drain!");
                 if let Ok(new_c) = handle_services!(
-                    service_name,
-                    tx,
+                    opts,
                     None,
-                    limit,
-                    processlogtype,
-                    filter,
-                    ev_type.clone(),
                     "sshd.events",
                     "sudo.events",
                     "login.events",

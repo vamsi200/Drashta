@@ -3,8 +3,8 @@
 #![allow(unused_imports)]
 
 use crate::parser::{
-    Cursor, CursorType, Entry, EventData, EventType, ProcessLogType, deserialize_cursor,
-    handle_service_event, read_journal_logs,
+    Cursor, CursorType, Entry, EventData, EventType, ParserFuncArgs, ProcessLogType,
+    deserialize_cursor, handle_service_event, read_journal_logs,
 };
 use anyhow::Result;
 use axum::extract::State;
@@ -60,13 +60,6 @@ pub struct FilterEvent {
     timestamp_to: Option<String>,
 }
 
-fn format_thing(map: BTreeMap<String, String>) -> String {
-    match map.get("MESSAGE") {
-        Some(r) => r.to_owned(),
-        None => "".to_string(),
-    }
-}
-
 pub async fn drain_older_logs(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
@@ -81,6 +74,7 @@ pub async fn drain_older_logs(
     let filter_keyword = filter_event.0.query;
 
     let cursor_type = filter_event.0.cursor.unwrap();
+
     let handle = tokio::task::spawn_blocking(move || {
         let tx = tx;
         let mut new_cursor_type: Option<CursorType> = None;
@@ -95,16 +89,18 @@ pub async fn drain_older_logs(
                 "Draining {ev} from {:?} upto {limit} entries (next)",
                 cursor_type,
             );
-            info!("Searched - {:?}", filter_keyword.clone());
-            if let Ok(cursor_type) = handle_service_event(
-                &ev,
+            info!("Called event_type - {:?}", ref_event_type.clone());
+
+            let opts = ParserFuncArgs::new(
+                ev.as_str(),
                 tx.clone(),
-                Some(cursor_type.clone()),
                 limit,
                 ProcessLogType::ProcessOlderLogs,
                 filter_keyword.clone(),
                 ref_event_type.clone(),
-            ) {
+                Some(cursor_type.clone()),
+            );
+            if let Ok(cursor_type) = handle_service_event(opts) {
                 new_cursor_type = cursor_type
             }
         }
@@ -153,17 +149,18 @@ pub async fn drain_upto_n_entries(
 
         for ev in journal_units_clone {
             info!("Draining {ev} up to {limit} entries");
-            info!("Searched - {:?}", filter_keyword.clone());
-
-            if let Ok(cursor) = handle_service_event(
-                &ev,
-                tx_clone.clone(),
-                None,
+            info!("Called event_type - {:?}", ref_event_type.clone());
+            let opts = ParserFuncArgs::new(
+                ev.as_str(),
+                tx.clone(),
                 limit,
                 ProcessLogType::ProcessInitialLogs,
                 filter_keyword.clone(),
                 ref_event_type.clone(),
-            ) {
+                None,
+            );
+
+            if let Ok(cursor) = handle_service_event(opts) {
                 if let Some(cursor_type) = cursor {
                     last_cursor = Some(cursor_type);
                     info!("Cursor - {:?}", last_cursor);
@@ -220,17 +217,19 @@ pub async fn drain_previous_logs(
                 "Draining {ev} from {:?} upto {limit} entries (previous)",
                 cursor_type
             );
-            info!("Searched - {:?}", filter_keyword.clone());
+            info!("Called event_type - {:?}", ref_event_type.clone());
 
-            let result = handle_service_event(
-                &ev,
+            let opts = ParserFuncArgs::new(
+                ev.as_str(),
                 tx.clone(),
-                Some(cursor_type.clone()),
                 limit,
                 ProcessLogType::ProcessPreviousLogs,
                 filter_keyword.clone(),
                 ref_event_type.clone(),
+                Some(cursor_type.clone()),
             );
+
+            let result = handle_service_event(opts);
 
             if let Ok(cursor_type) = result {
                 new_cursor_type = cursor_type;
