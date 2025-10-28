@@ -23,8 +23,7 @@ use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::PathBuf;
 use std::result::Result::Ok;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -59,6 +58,7 @@ impl RawMsgType {
         }
     }
 }
+
 #[derive(PartialEq, Deserialize, Serialize, Debug, Clone)]
 pub struct Cursor {
     pub timestamp: String,
@@ -172,7 +172,6 @@ impl<'a> ParserFuncArgs<'a> {
 
 pub static MANUAL_PARSE_EVENTS: Lazy<Vec<&'static str>> = Lazy::new(|| vec!["pkgmanager.events"]);
 
-// TODO: Work on using Structs for function arguments.. I can't do this all day lil bro..
 macro_rules! handle_services {
     (
         $opts:expr,
@@ -1574,7 +1573,6 @@ pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> 
                 }
             }
             None => {
-                info!("Invoked initial drain!");
                 if let Ok(new_c) = handle_services!(
                     opts,
                     None,
@@ -1611,45 +1609,46 @@ pub fn search_logs(input: EventData, search_query: &str) -> Result<()> {
     }
     Ok(())
 }
+
 pub fn read_journal_logs(
-    tx: tokio::sync::broadcast::Sender<EventData>,
-    unit: Option<Vec<String>>,
+    service_name: &str,
+    filter: Option<String>,
     ev_type: Option<Vec<&str>>,
+    tx: tokio::sync::broadcast::Sender<EventData>,
 ) -> Result<()> {
-    let mut s: Journal = journal::OpenOptions::default()
+    let configs = get_service_configs();
+
+    let Some(config) = configs.get(service_name) else {
+        anyhow::bail!("Unknown Service: {}", service_name);
+    };
+
+    let mut journal: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
-        .open()
-        .unwrap();
+        .open()?;
+    for (field, val) in &config.matches {
+        journal.match_add(field, val.to_string())?;
+        journal.match_or()?;
+    }
+    let mut keyword = String::new();
+    if let Some(filter) = filter {
+        keyword = filter;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_micros() as u64;
 
-    if let Some(ref unit) = unit {
-        for val in unit {
-            if val == "sshd.events" {
-                s.match_add("_COMM", "sshd-session")?;
-                s.match_or()?;
-                s.match_add("_COMM", "sshd")?;
-                s.match_or()?;
-                s.match_add("_EXE", "/usr/sbin/sshd")?;
-                s.match_or()?;
-                s.match_add("_SYSTEMD_UNIT", "sshd@.service")?;
-
-                info!("Watching sshd live events...");
-
-                let now = std::time::SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_micros() as u64;
-
-                s.seek_realtime_usec(now)?;
-                loop {
-                    while let Some(data) = s.next_entry()? {
-                        if let Some(ev) = parse_sshd_logs(data, ev_type.clone()) {
-                            let _ = tx.send(ev);
-                        }
-                    }
-                    sleep(Duration::from_secs(1));
+    journal.seek_realtime_usec(now)?;
+    loop {
+        while let Some(data) = journal.next_entry()? {
+            if let Some(ev) = (config.parser)(data, ev_type.clone()) {
+                if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                    continue;
+                }
+                if tx.send(ev).is_err() {
+                    error!("Event Dropped!");
                 }
             }
         }
+        sleep(Duration::from_secs(1));
     }
-
-    Ok(())
 }

@@ -4,7 +4,7 @@
 
 use crate::parser::{
     Cursor, CursorType, Entry, EventData, EventType, ParserFuncArgs, ProcessLogType,
-    deserialize_cursor, handle_service_event, read_journal_logs,
+    deserialize_cursor, get_service_configs, handle_service_event, read_journal_logs,
 };
 use anyhow::Result;
 use axum::extract::State;
@@ -53,7 +53,7 @@ pub struct FilterEvent {
     event_name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_cursor")]
     cursor: Option<CursorType>,
-    limit: i32,
+    limit: Option<i32>,
     query: Option<String>,
     event_type: Option<Vec<String>>,
     timestamp_from: Option<String>,
@@ -70,7 +70,7 @@ pub async fn drain_older_logs(
         Some(event) => journal_units.push(event),
         None => journal_units.clear(),
     }
-    let limit = filter_event.0.limit;
+    let limit = filter_event.0.limit.unwrap();
     let filter_keyword = filter_event.0.query;
 
     let cursor_type = filter_event.0.cursor.unwrap();
@@ -86,10 +86,9 @@ pub async fn drain_older_logs(
 
         for ev in journal_units {
             info!(
-                "Draining {ev} from {:?} upto {limit} entries (next)",
-                cursor_type,
+                "Draining {ev} from {:?} upto {:?} entries (next)",
+                cursor_type, limit
             );
-            info!("Called event_type - {:?}", ref_event_type.clone());
 
             let opts = ParserFuncArgs::new(
                 ev.as_str(),
@@ -134,7 +133,7 @@ pub async fn drain_upto_n_entries(
         None => journal_units.clear(),
     }
 
-    let limit = filter_event.0.limit;
+    let limit = filter_event.0.limit.unwrap();
     let journal_units_clone = journal_units.clone();
     let tx_clone = tx.clone();
     let filter_keyword = filter_event.0.query;
@@ -147,9 +146,8 @@ pub async fn drain_upto_n_entries(
 
         let mut last_cursor: Option<CursorType> = None;
 
+        info!("Invoked initial drain!");
         for ev in journal_units_clone {
-            info!("Draining {ev} up to {limit} entries");
-            info!("Called event_type - {:?}", ref_event_type.clone());
             let opts = ParserFuncArgs::new(
                 ev.as_str(),
                 tx.clone(),
@@ -172,7 +170,6 @@ pub async fn drain_upto_n_entries(
     });
 
     let cursor = handle.await.unwrap();
-    info!("Cursor - {:?}", cursor);
     let stream = async_stream::stream! {
         if let Some(cursor) = cursor {
             let cursor_json = json!({ "cursor": cursor }).to_string();
@@ -198,7 +195,7 @@ pub async fn drain_previous_logs(
         Some(event) => journal_units.push(event),
         None => journal_units.clear(),
     }
-    let limit = filter_event.0.limit;
+    let limit = filter_event.0.limit.unwrap();
 
     let cursor_type = filter_event.0.cursor.unwrap();
     let filter_keyword = filter_event.0.query;
@@ -214,10 +211,9 @@ pub async fn drain_previous_logs(
 
         for ev in journal_units {
             info!(
-                "Draining {ev} from {:?} upto {limit} entries (previous)",
+                "Draining {ev} from {:?} upto {limit:?} entries (previous)",
                 cursor_type
             );
-            info!("Called event_type - {:?}", ref_event_type.clone());
 
             let opts = ParserFuncArgs::new(
                 ev.as_str(),
@@ -264,9 +260,8 @@ pub async fn receive_data(
         Some(event) => journal_units.push(event),
         None => journal_units.clear(),
     }
-    let local = tokio::task::LocalSet::new();
+    let filter_keyword = filter_event.0.query;
 
-    println!("Getting Live Events");
     std::thread::spawn(move || {
         let ref_event_type = filter_event
             .0
@@ -274,8 +269,16 @@ pub async fn receive_data(
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
-        if let Err(e) = read_journal_logs(tx, Some(journal_units), ref_event_type) {
-            eprintln!("Error: {e}");
+        for val in journal_units {
+            info!("Trying to get Live Events from `{}`", val);
+            if let Err(e) = read_journal_logs(
+                &val,
+                filter_keyword.clone(),
+                ref_event_type.clone(),
+                tx.clone(),
+            ) {
+                eprintln!("Error: {e}");
+            }
         }
     });
 
