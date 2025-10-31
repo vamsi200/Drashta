@@ -8,7 +8,7 @@ use anyhow::{Ok, Result};
 use drashta::events::receive_data;
 use drashta::parser::{
     self, Cursor, Entry, EventData, EventType, RawMsgType, process_manual_events_previous,
-    process_manual_events_upto_n, search_logs,
+    process_manual_events_upto_n,
 };
 use drashta::render::render_app;
 use log::info;

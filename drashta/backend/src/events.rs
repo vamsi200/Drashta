@@ -85,10 +85,7 @@ pub async fn drain_older_logs(
             .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
         for ev in journal_units {
-            info!(
-                "Draining {ev} from {:?} upto {:?} entries (next)",
-                cursor_type, limit
-            );
+            info!("Draining {ev} from {cursor_type:?} upto {limit} entries (next)",);
 
             let opts = ParserFuncArgs::new(
                 ev.as_str(),
@@ -137,7 +134,7 @@ pub async fn drain_upto_n_entries(
     let journal_units_clone = journal_units.clone();
     let tx_clone = tx.clone();
     let filter_keyword = filter_event.0.query;
-    let handle = tokio::task::spawn_blocking(move || {
+    let handle = tokio::spawn(async move {
         let ref_event_type: Option<Vec<&str>> = filter_event
             .0
             .event_type
@@ -158,11 +155,9 @@ pub async fn drain_upto_n_entries(
                 None,
             );
 
-            if let Ok(cursor) = handle_service_event(opts) {
-                if let Some(cursor_type) = cursor {
-                    last_cursor = Some(cursor_type);
-                    info!("Cursor - {:?}", last_cursor);
-                }
+            if let Ok(Some(cursor_type)) = handle_service_event(opts) {
+                last_cursor = Some(cursor_type);
+                info!("Cursor - {last_cursor:?}");
             }
         }
 
@@ -210,10 +205,7 @@ pub async fn drain_previous_logs(
             .map(|s| s.iter().map(|s| s.as_str()).collect());
 
         for ev in journal_units {
-            info!(
-                "Draining {ev} from {:?} upto {limit:?} entries (previous)",
-                cursor_type
-            );
+            info!("Draining {ev} from {cursor_type:?} upto {limit:?} entries (previous)",);
 
             let opts = ParserFuncArgs::new(
                 ev.as_str(),
@@ -270,7 +262,7 @@ pub async fn receive_data(
             .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
         for val in journal_units {
-            info!("Trying to get Live Events from `{}`", val);
+            info!("Trying to get Live Events from `{val}`");
             if let Err(e) = read_journal_logs(
                 &val,
                 filter_keyword.clone(),
@@ -288,12 +280,12 @@ pub async fn receive_data(
                 let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
                 Some(Ok(Event::default().data(json)))
             }
-            Err(e) => {
-                info!("Event Dropped!");
-                Some(Ok(Event::default()))
-            } // Err(_) => None,
+            Err(_) => None,
         }
     });
-
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    )
 }

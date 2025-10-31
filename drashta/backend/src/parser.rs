@@ -9,6 +9,7 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use aho_corasick::{Input, Match, automaton::Automaton, dfa::DFA};
 use anyhow::Result;
 use axum::extract::State;
+use chrono::{DateTime, Local, TimeZone};
 use futures::future::Either;
 use log::{error, info};
 use memchr::memmem;
@@ -21,6 +22,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::result::Result::Ok;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -49,7 +51,7 @@ impl RawMsgType {
     fn contains_bytes(&self, pat: &str) -> bool {
         let ac = AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
-            .build(&[pat])
+            .build([pat])
             .unwrap();
 
         match self {
@@ -122,6 +124,28 @@ pub enum EventType {
     CmdRun,
     CronReload,
     NewConnection,
+    ConnectionActivated,
+    ConnectionDeactivated,
+    DhcpLease,
+    IpConfig,
+    DeviceAdded,
+    DeviceRemoved,
+    WifiAssociationSuccess,
+    WifiAuthFailure,
+    StateChange,
+    ConnectionAttempt,
+    PolicyChange,
+    WifiScan,
+    DnsConfig,
+    VpnEvent,
+    FirewallEvent,
+    AgentRequest,
+    ConnectivityCheck,
+    DispatcherEvent,
+    LinkEvent,
+    AuditEvent,
+    VirtualDeviceEvent,
+    SystemdEvent,
 }
 
 type ParserFn = fn(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData>;
@@ -139,7 +163,7 @@ pub struct ParserFuncArgs<'a> {
     processlogtype: ProcessLogType,
     filter: Option<String>,
     ev_type: Option<Vec<&'a str>>,
-    journal: Arc<Mutex<Journal>>,
+    journal: Rc<Mutex<Journal>>,
     cursor: Option<CursorType>,
 }
 
@@ -165,7 +189,7 @@ impl<'a> ParserFuncArgs<'a> {
             processlogtype,
             filter,
             ev_type,
-            journal: Arc::new(Mutex::new(journal)),
+            journal: Rc::new(Mutex::new(journal)),
         }
     }
 }
@@ -261,7 +285,19 @@ pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
         "CronSessionOpen" => &["CRON_SESSION_OPEN"],
         "CronSessionClose" => &["CRON_SESSION_CLOSE"],
         "NewConnection" => &["CONNECTION_CLOSED"],
-
+        // NETWORK MANAGER
+        "NetworkConnectionActivated" => &["CONNECTION_ACTIVATED"],
+        "NetworkConnectionDeactivated" => &["CONNECTION_DEACTIVATED"],
+        "NetworkDhcpLease" => &["DHCP_LEASE"],
+        "NetworkIpConfig" => &["IP_CONFIG"],
+        "NetworkDeviceAdded" => &["DEVICE_ADDED"],
+        "NetworkDeviceRemoved" => &["DEVICE_REMOVED"],
+        "NetworkWifiAssociationSuccess" => &["WIFI_ASSOC_SUCCESS"],
+        "NetworkWifiAuthFailure" => &["WIFI_AUTH_FAILURE"],
+        "NetworkStateChange" => &["STATE_CHANGE"],
+        "NetworkConnectionAttempt" => &["CONNECTION_ATTEMPT"],
+        "NetworkWarning" => &["WARNING"],
+        "NetworkUnknown" => &["UNKNOWN"],
         _ => &[],
     }
 }
@@ -281,14 +317,74 @@ pub fn parse_sshd_logs(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<E
             ("UNKNOWN", Regex::new(r"(?s)^(.*\S.*)$").unwrap()),
         ]
     });
-    static PROTOCOL_MISMATCH: Lazy<Vec<Regex>> = Lazy::new(|| {
+    static PROTOCOL_MISMATCH: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         vec![
-        Regex::new(r"(?x)^kex_exchange_identification:\s*(?:read:\s*)?(Client sent invalid protocol identifier|Connection (?:closed by remote host|reset by peer))\s*$").unwrap(),
-        Regex::new(r"(?x)^Bad\s+protocol\s+version\s+identification\s+'(.+?)'(?:\s+from\s+([0-9A-Fa-f:.]+))?(?:\s+port\s+(\d+))?\s*$").unwrap(),
-        Regex::new(r"(?x)^Protocol\s+major\s+versions\s+differ\s+for\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+):\s*(\d+)\s*vs\.\s*(\d+)\s*$").unwrap(),
-        Regex::new(r"(?x)^(?:banner\s+exchange|ssh_dispatch_run_fatal):\s+Connection\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+):\s*(invalid format|message authentication code incorrect|Connection corrupted)(?:\s+\[preauth\])?\s*$").unwrap(),
-        Regex::new(r"(?x)^Read\s+from\s+socket\s+failed:\s+Connection\s+(?:reset|closed)\s+by\s+peer\s*$").unwrap(),
-    ]
+            (
+                "INVALID_PROTOCOL_ID",
+                Regex::new(
+                    r"(?x)
+                ^kex_exchange_identification:\s*
+                (?:read:\s*)?
+                (Client\s+sent\s+invalid\s+protocol\s+identifier|
+                 Connection\s+(?:closed\s+by\s+remote\s+host|reset\s+by\s+peer))
+                \s*$
+            ",
+                )
+                .unwrap(),
+            ),
+            (
+                "BAD_PROTOCOL_VERSION",
+                Regex::new(
+                    r"(?x)
+                ^Bad\s+protocol\s+version\s+identification\s+
+                '(.+?)'
+                (?:\s+from\s+([0-9A-Fa-f:.]+))?
+                (?:\s+port\s+(\d+))?
+                \s*$
+            ",
+                )
+                .unwrap(),
+            ),
+            (
+                "MAJOR_VERSION_DIFF",
+                Regex::new(
+                    r"(?x)
+                ^Protocol\s+major\s+versions\s+differ\s+
+                for\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+):\s*
+                (\d+)\s*vs\.\s*(\d+)
+                \s*$
+            ",
+                )
+                .unwrap(),
+            ),
+            (
+                "BANNER_OR_DISPATCH_ERROR",
+                Regex::new(
+                    r"(?x)
+                ^(?:banner\s+exchange|ssh_dispatch_run_fatal):\s+
+                Connection\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+):\s*
+                (invalid\s+format|
+                 message\s+authentication\s+code\s+incorrect|
+                 Connection\s+corrupted)
+                (?:\s+\[preauth\])?
+                \s*$
+            ",
+                )
+                .unwrap(),
+            ),
+            (
+                "SOCKET_READ_FAILURE",
+                Regex::new(
+                    r"(?x)
+                ^Read\s+from\s+socket\s+failed:\s+
+                Connection\s+(?:reset|closed)\s+by\s+peer
+                \s*$
+            ",
+                )
+                .unwrap(),
+            ),
+            ("UNKNOWN", Regex::new(r"(?s)^(.*\S.*)$").unwrap()),
+        ]
     });
 
     let msg = entry_map.get("MESSAGE")?;
@@ -305,18 +401,15 @@ pub fn parse_sshd_logs(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<E
 
         SSHD_REGEX
             .iter()
+            .chain(PROTOCOL_MISMATCH.iter())
             .filter(|(name, _)| names.contains(name))
             .collect()
     } else {
-        SSHD_REGEX.iter().collect()
+        SSHD_REGEX.iter().chain(PROTOCOL_MISMATCH.iter()).collect()
     };
 
     let mut map = AHashMap::new();
     let s = entry_map.get("MESSAGE")?;
-    let timestamp = entry_map
-        .get("SYSLOG_TIMESTAMP")
-        .cloned()
-        .unwrap_or_default();
 
     for (name, regex) in filtered_regexes {
         if let Some(caps) = regex.captures(s) {
@@ -993,9 +1086,385 @@ pub fn parse_config_change_events(
     }
     None
 }
-pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
-    todo!()
+
+fn format_syslog_timestamp(ts_microseconds: &str) -> String {
+    if let Ok(micros) = ts_microseconds.parse::<i64>() {
+        let dt: DateTime<Local> = Local.timestamp_micros(micros).unwrap();
+        dt.format("%b %e %H:%M:%S").to_string()
+    } else {
+        "invalid".into()
+    }
 }
+
+pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
+    static NETWORK_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
+        vec![
+        (
+            "DEVICE_ACTIVATION",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn|error)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                device\s+\((?P<device>[^)]+)\):\s+
+                Activation:\s+(?P<result>successful|starting\s+connection|failed),?\s+
+                (?P<details>.*?)\.?\s*$
+                "
+            ).unwrap(),
+        ),
+        (
+            "DEVICE_STATE_CHANGE",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn|debug)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                device\s+\((?P<device>[^)]+)\):\s+
+                state\s+change:\s+
+                (?P<from>\S+)\s+->\s+(?P<to>\S+)\s+
+                \(reason\s+'(?P<reason>[^']*)',?\s*
+                (?:sys-iface-state:\s+'(?P<sys_state>[^']+)'|managed-type:\s+'(?P<mgmt_type>[^']+)')?\)
+                "
+            ).unwrap(),
+        ),
+        (
+            "MANAGER_STATE",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                manager:\s+
+                (?:NetworkManager\s+state\s+is\s+now\s+(?P<state>\S+)|
+                   startup\s+complete|
+                   NetworkManager\s+\(version\s+(?P<version>[^)]+)\)\s+is\s+(?P<action>starting|stopping))
+                "
+            ).unwrap(),
+        ),
+        (
+            "DHCP_EVENT",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn|debug)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                dhcp(?P<version>[46])?\s+\((?P<iface>[^)]+)\):\s+
+                (?:state\s+changed\s+(?P<from>\S+)\s+->\s+(?P<to>\S+)|
+                   option\s+(?P<option>\S+)\s+=>\s+'?(?P<value>[^']+)'?|
+                   (?P<msg>.*))
+                "
+            ).unwrap(),
+        ),
+        (
+            "DHCP_INIT",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                dhcp-init:\s+Using\s+DHCP\s+client\s+'(?P<client>[^']+)'
+                "
+            ).unwrap(),
+        ),
+        (
+            "POLICY_SET",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                policy:\s+set\s+'(?P<connection>[^']+)'\s+\((?P<iface>[^)]+)\)\s+
+                as\s+default\s+for\s+(?P<purpose>IPv4|IPv6|DNS|routing).*?
+                "
+            ).unwrap(),
+        ),
+        (
+            "SUPPLICANT_STATE",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|debug)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                device\s+\((?P<device>[^)]+)\):\s+
+                supplicant\s+(?:interface|management\s+interface)\s+state:\s+
+                (?P<from>\S+)\s+->\s+(?P<to>\S+)
+                "
+            ).unwrap(),
+        ),
+        (
+            "WIFI_SCAN",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|debug)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                device\s+\((?P<device>[^)]+)\):\s+
+                (?:wifi-scan:\s+.*|
+                   supplicant\s+interface\s+state:\s+.*scanning.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "PLATFORM_ERROR",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>warn|error)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                platform(?:-linux)?:\s+
+                (?P<operation>do-\S+)\[(?P<details>[^\]]+)\]:\s+
+                (?:failure\s+(?P<errno>\d+)\s+\((?P<error>[^)]+)\)|(?P<msg>.*))
+                "
+            ).unwrap(),
+        ),
+        (
+            "SETTINGS_CONNECTION",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?:settings|settings-connection):\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "DNS_CONFIG",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                dns:\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "VPN_EVENT",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn|error)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?:vpn-connection|vpn):\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "FIREWALL_EVENT",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                firewall:\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "AGENT_REQUEST",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                agent-manager:\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "CONNECTIVITY_CHECK",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                connectivity:\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "DISPATCHER",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                dispatcher:\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "LINK_EVENT",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn|debug)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                device\s+\((?P<device>[^)]+)\):\s+
+                (?:link\s+(?P<state>connected|disconnected)|
+                   carrier:\s+link\s+(?P<carrier>connected|disconnected))
+                "
+            ).unwrap(),
+        ),
+        (
+            "VIRTUAL_DEVICE",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?:bridge|bond|team|vlan):\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "AUDIT",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                audit:\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "SYSTEMD",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                systemd:\s+
+                (?P<msg>.*)
+                "
+            ).unwrap(),
+        ),
+        (
+            "GENERIC",
+            Regex::new(
+                r"(?x)
+                ^<(?P<level>info|warn|error|debug)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?P<component>\S+):\s+
+                (?P<msg>.+)$
+                "
+            ).unwrap(),
+        ),
+        (
+            "UNKNOWN",
+            Regex::new(r"(?s)^(?P<msg>.+)$").unwrap(),
+        ),
+    ]
+    });
+    let msg = entry_map.get("MESSAGE")?;
+
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+        NETWORK_REGEX
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect()
+    } else {
+        NETWORK_REGEX.iter().collect()
+    };
+
+    let mut map = AHashMap::new();
+    let s = entry_map.get("MESSAGE")?;
+
+    let journal_timestamp = entry_map
+        .get("_SOURCE_REALTIME_TIMESTAMP")
+        .cloned()
+        .unwrap_or_default();
+    let timestamp = format_syslog_timestamp(&journal_timestamp);
+    for (name, regex) in filtered_regexes {
+        if let Some(caps) = regex.captures(s) {
+            let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                "DEVICE_ACTIVATION" => (
+                    Some(&[("device", 1), ("result", 2), ("details", 3)]),
+                    EventType::ConnectionActivated,
+                ),
+                "DEVICE_STATE_CHANGE" => (
+                    Some(&[("device", 1), ("from", 2), ("to", 3), ("reason", 4)]),
+                    EventType::StateChange,
+                ),
+                "MANAGER_STATE" => (
+                    Some(&[("state", 1), ("version", 2), ("action", 3)]),
+                    EventType::StateChange,
+                ),
+                "DHCP_EVENT" => (
+                    Some(&[
+                        ("iface", 1),
+                        ("version", 2),
+                        ("from", 3),
+                        ("to", 4),
+                        ("option", 5),
+                        ("value", 6),
+                    ]),
+                    EventType::DhcpLease,
+                ),
+                "DHCP_INIT" => (Some(&[("client", 1)]), EventType::DhcpLease),
+                "POLICY_SET" => (
+                    Some(&[("connection", 1), ("iface", 2), ("purpose", 3)]),
+                    EventType::PolicyChange,
+                ),
+                "SUPPLICANT_STATE" => (
+                    Some(&[("device", 1), ("from", 2), ("to", 3)]),
+                    EventType::WifiAssociationSuccess,
+                ),
+                "WIFI_SCAN" => (Some(&[("device", 1)]), EventType::WifiScan),
+                "PLATFORM_ERROR" => (
+                    Some(&[("operation", 1), ("details", 2), ("errno", 3), ("error", 4)]),
+                    EventType::Warning,
+                ),
+                "SETTINGS_CONNECTION" => (Some(&[("msg", 1)]), EventType::ConnectionAttempt),
+                "DNS_CONFIG" => (Some(&[("msg", 1)]), EventType::DnsConfig),
+                "VPN_EVENT" => (Some(&[("msg", 1)]), EventType::VpnEvent),
+                "FIREWALL_EVENT" => (Some(&[("msg", 1)]), EventType::FirewallEvent),
+                "AGENT_REQUEST" => (Some(&[("msg", 1)]), EventType::AgentRequest),
+                "CONNECTIVITY_CHECK" => (Some(&[("msg", 1)]), EventType::ConnectivityCheck),
+                "DISPATCHER" => (Some(&[("msg", 1)]), EventType::DispatcherEvent),
+                "LINK_EVENT" => (
+                    Some(&[("device", 1), ("state", 2), ("carrier", 3)]),
+                    EventType::LinkEvent,
+                ),
+                "VIRTUAL_DEVICE" => (Some(&[("msg", 1)]), EventType::VirtualDeviceEvent),
+                "AUDIT" => (Some(&[("msg", 1)]), EventType::AuditEvent),
+                "SYSTEMD" => (Some(&[("msg", 1)]), EventType::SystemdEvent),
+                "GENERIC" => (Some(&[("component", 1), ("msg", 2)]), EventType::Other),
+
+                "CONNECTION_ACTIVATED" => (
+                    Some(&[("device", 1), ("type", 2)]),
+                    EventType::ConnectionActivated,
+                ),
+                "CONNECTION_DEACTIVATED" => (
+                    Some(&[("device", 1), ("type", 2)]),
+                    EventType::ConnectionDeactivated,
+                ),
+                "DHCP_LEASE" => (Some(&[("device", 1), ("ip", 2)]), EventType::DhcpLease),
+                "IP_CONFIG" => (
+                    Some(&[("timestamp", 1), ("device", 2)]),
+                    EventType::IpConfig,
+                ),
+                "DEVICE_ADDED" => (
+                    Some(&[("timestamp", 1), ("device_info", 2)]),
+                    EventType::DeviceAdded,
+                ),
+                "DEVICE_REMOVED" => (
+                    Some(&[("timestamp", 1), ("device_info", 2)]),
+                    EventType::DeviceRemoved,
+                ),
+                "WIFI_ASSOC_SUCCESS" => {
+                    (Some(&[("timestamp", 1)]), EventType::WifiAssociationSuccess)
+                }
+                "WIFI_AUTH_FAILURE" => (
+                    Some(&[("timestamp", 1), ("reason", 2)]),
+                    EventType::WifiAuthFailure,
+                ),
+                "STATE_CHANGE" => (
+                    Some(&[("timestamp", 1), ("state", 2)]),
+                    EventType::StateChange,
+                ),
+                "CONNECTION_ATTEMPT" => (
+                    Some(&[("timestamp", 1), ("connection", 2)]),
+                    EventType::ConnectionAttempt,
+                ),
+                "WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
+                "UNKNOWN" => (Some(&[("msg", 1)]), EventType::Other),
+                _ => (Some(&[("msg", 1)]), EventType::Other),
+            };
+
+            if let Some(fields) = data {
+                for &(fname, idx) in fields {
+                    if let Some(m) = caps.get(idx) {
+                        map.insert(fname.to_string(), m.as_str().to_string());
+                    }
+                }
+            }
+            return Some(EventData {
+                timestamp,
+                service: Service::NetworkManager,
+                data: map,
+                event_type,
+                raw_msg: RawMsgType::Structured(entry_map),
+            });
+        }
+    }
+    None
+}
+
 pub fn parse_firewalld_events(map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     todo!()
 }
@@ -1040,9 +1509,12 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
     );
 
     map.insert(
-        "network.events",
+        "networkmanager.events",
         ServiceConfig {
-            matches: vec![("_SYSTEMD_UNIT", "NetworkManager.service")],
+            matches: vec![
+                ("_SYSTEMD_UNIT", "NetworkManager.service"),
+                ("_EXE", "/usr/bin/NetworkManager"),
+            ],
             parser: parse_network_events,
         },
     );
@@ -1079,16 +1551,11 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
 }
 
 pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> Result<String> {
-    let filter = opts.filter;
+    let filter = opts.filter.unwrap_or_default();
     let limit = opts.limit;
     let tx = opts.tx;
     let mut journal = opts.journal.lock().unwrap();
     let event_type = opts.ev_type;
-
-    let mut keyword = String::new();
-    if let Some(filter) = filter {
-        keyword = filter;
-    }
 
     for (field, value) in &config.matches {
         journal.match_add(field, value.to_string())?;
@@ -1096,20 +1563,26 @@ pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> R
     }
 
     journal.seek_head()?;
-    let mut count = 0;
-    while count < limit {
+    let mut sent = 0;
+    let mut scanned = 0;
+    let max_scan = limit * 10;
+    while sent < limit {
         if let Some(data) = journal.next_entry()? {
+            scanned += 1;
+
             if let Some(ev) = (config.parser)(data, event_type.clone()) {
-                if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                if !ev.raw_msg.contains_bytes(&filter) {
                     continue;
                 }
-                if tx.blocking_send(ev).is_err() {
-                    error!("Event Dropped!");
+
+                if tx.try_send(ev).is_err() {
+                    continue;
+                } else {
+                    sent += 1;
                 }
-                count += 1;
             }
         } else {
-            break;
+            break; // reached end of journal
         }
     }
 
@@ -1280,11 +1753,8 @@ pub fn process_manual_events_upto_n(opts: ParserFuncArgs) -> Result<Option<Curso
                 if cursor.is_none() {
                     let timestamp = ev.timestamp.clone();
                     let mut data = String::new();
-                    match ev.raw_msg.clone() {
-                        RawMsgType::Plain(s) => {
-                            data = s;
-                        }
-                        _ => {}
+                    if let RawMsgType::Plain(s) = ev.raw_msg.clone() {
+                        data = s;
                     }
                     cursor = Some(Cursor {
                         timestamp,
@@ -1397,7 +1867,7 @@ pub fn process_manual_events_previous(
         let mut count = 0;
         if patterns
             .iter()
-            .all(|pat| memmem::find(lines.iter().nth(0).unwrap().as_bytes(), pat).is_some())
+            .all(|pat| memmem::find(lines.first().unwrap().as_bytes(), pat).is_some())
         {
             for line in lines {
                 if count >= limit {
@@ -1462,7 +1932,7 @@ pub fn read_file_backward(path: &str, offset: u64) -> Result<Vec<String>> {
 
         let chunk = String::from_utf8_lossy(&buf).to_string();
 
-        let full_chunk = format!("{}{}", chunk, partial_line);
+        let full_chunk = format!("{chunk}{partial_line}");
         let split: Vec<&str> = full_chunk.split('\n').collect();
 
         partial_line = split[0].to_string();
@@ -1491,15 +1961,15 @@ impl FromStr for CursorType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.starts_with("Journal:") {
-            Ok(CursorType::Journal(s["Journal:".len()..].to_string()))
-        } else if s.starts_with("Manual:") {
-            let json_str = &s["Manual:".len()..];
+        if let Some(val) = s.strip_prefix("Journal:") {
+            Ok(CursorType::Journal(val.to_string()))
+        } else if let Some(val) = s.strip_prefix("Manual:") {
+            let json_str = val;
             serde_json::from_str::<Cursor>(json_str)
                 .map(CursorType::Manual)
-                .map_err(|e| format!("Failed to parse Manual cursor: {}", e))
+                .map_err(|e| format!("Failed to parse Manual cursor: {e}"))
         } else {
-            Err(format!("Unknown cursor variant: {}", s))
+            Err(format!("Unknown cursor variant: {s}"))
         }
     }
 }
@@ -1528,7 +1998,7 @@ pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> 
     let processlogtype = opts.processlogtype.clone();
     let limit = opts.limit;
     let tx = opts.tx.clone();
-    let is_manual_service = MANUAL_PARSE_EVENTS.iter().any(|&ev| ev == service_name);
+    let is_manual_service = MANUAL_PARSE_EVENTS.contains(&service_name);
     let configs = get_service_configs();
 
     if is_manual_service {
@@ -1563,7 +2033,7 @@ pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> 
                     "sudo.events",
                     "login.events",
                     "firewall.events",
-                    "network.events",
+                    "networkmanager.events",
                     "kernel.events",
                     "userchange.events",
                     "configchange.events",
@@ -1580,7 +2050,7 @@ pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> 
                     "sudo.events",
                     "login.events",
                     "firewall.events",
-                    "network.events",
+                    "networkmanager.events",
                     "kernel.events",
                     "userchange.events",
                     "configchange.events",
@@ -1595,28 +2065,18 @@ pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> 
     Ok(cursor_type)
 }
 
-pub fn search_logs(input: EventData, search_query: &str) -> Result<()> {
-    let patterns = &[search_query];
-    let ac = AhoCorasick::new(patterns).unwrap();
-    let data = input.raw_msg;
-    match data {
-        RawMsgType::Plain(ref map) => {
-            for mat in ac.find_iter(map.as_str()) {
-                info!("Found in line - {:?}", map);
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
+const MAX_FAILED_EVENTS: usize = 5_000;
 
 pub fn read_journal_logs(
     service_name: &str,
     filter: Option<String>,
     ev_type: Option<Vec<&str>>,
     tx: tokio::sync::broadcast::Sender<EventData>,
-) -> Result<()> {
+) -> anyhow::Result<()> {
+    use std::{collections::VecDeque, thread::sleep, time::Duration};
+
     let configs = get_service_configs();
+    let mut failed_ev_buf = VecDeque::new();
 
     let Some(config) = configs.get(service_name) else {
         anyhow::bail!("Unknown Service: {}", service_name);
@@ -1629,26 +2089,51 @@ pub fn read_journal_logs(
         journal.match_add(field, val.to_string())?;
         journal.match_or()?;
     }
-    let mut keyword = String::new();
-    if let Some(filter) = filter {
-        keyword = filter;
-    }
+
+    let keyword = filter.unwrap_or_default();
+
     let now = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
+        .duration_since(std::time::UNIX_EPOCH)?
         .as_micros() as u64;
 
     journal.seek_realtime_usec(now)?;
+
     loop {
         while let Some(data) = journal.next_entry()? {
             if let Some(ev) = (config.parser)(data, ev_type.clone()) {
-                if !ev.raw_msg.contains_bytes(keyword.as_str()) {
+                if !ev.raw_msg.contains_bytes(&keyword) {
                     continue;
                 }
-                if tx.send(ev).is_err() {
-                    error!("Event Dropped!");
+
+                if let Err(_) = tx.send(ev.clone()) {
+                    info!("No active receiver, buffering event...");
+                    failed_ev_buf.push_back(ev);
                 }
             }
         }
-        sleep(Duration::from_secs(1));
+
+        if failed_ev_buf.len() >= MAX_FAILED_EVENTS {
+            failed_ev_buf.pop_front();
+        }
+
+        if failed_ev_buf.capacity() > MAX_FAILED_EVENTS * 2 {
+            failed_ev_buf.shrink_to_fit();
+        }
+
+        if tx.receiver_count() > 0 && !failed_ev_buf.is_empty() {
+            info!("Receiver reconnected, flushing buffered events...");
+
+            let mut still_failed = VecDeque::new();
+            while let Some(ev) = failed_ev_buf.pop_front() {
+                if tx.send(ev.clone()).is_err() {
+                    still_failed.push_back(ev);
+                    break;
+                }
+            }
+
+            failed_ev_buf = still_failed;
+        }
+
+        sleep(Duration::from_millis(500));
     }
 }
