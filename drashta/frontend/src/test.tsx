@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback, memo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import LogCountChart from "./chart";
 import DateRangePicker from "./DateRangePicker";
@@ -17,6 +17,7 @@ type EventData = {
 
 type SortDirection = "asc" | "desc" | null;
 type EventSourceType = "drain" | "live";
+export type ThemeType = "emerald" | "white" | "black";
 
 const SERVICES = [
   "All",
@@ -27,7 +28,7 @@ const SERVICES = [
   "ConfigChange",
   "PkgManager",
   "Firewall",
-  "Network",
+  "NetworkManager",
 ];
 
 const LIFETIME_VALUE = 999999999;
@@ -44,58 +45,149 @@ const TIME_RANGES = [
   { label: "Lifetime", value: LIFETIME_VALUE },
 ];
 
+export const THEME_CONFIG: Record<ThemeType, {
+  bg: string;
+  text: string;
+  border: string;
+  accent: string;
+  hover: string;
+  activeBtn: string;
+  inactiveBtn: string;
+  logRowBg: string;
+  logRowHover: string;
+  logRowBorder: string;
+  expandedBg: string;
+  modalBg: string;
+}> = {
+  emerald: {
+    bg: "bg-black",
+    text: "text-green-400",
+    border: "border-green-600",
+    accent: "text-green-600",
+    hover: "hover:bg-green-950",
+    activeBtn: "bg-green-600 text-black",
+    inactiveBtn: "bg-black text-green-400",
+    logRowBg: "bg-black",
+    logRowHover: "hover:bg-green-950/30",
+    logRowBorder: "border-green-600/20",
+    expandedBg: "bg-black/50 border-l-green-600",
+    modalBg: "bg-black",
+  },
+  white: {
+    bg: "bg-white",
+    text: "text-gray-900",
+    border: "border-gray-300",
+    accent: "text-gray-600",
+    hover: "hover:bg-gray-100",
+    activeBtn: "bg-gray-900 text-white",
+    inactiveBtn: "bg-white text-gray-900",
+    logRowBg: "bg-white",
+    logRowHover: "hover:bg-gray-50",
+    logRowBorder: "border-gray-200",
+    expandedBg: "bg-gray-50 border-l-gray-400",
+    modalBg: "bg-white",
+  },
+  black: {
+    bg: "bg-black",
+    text: "text-white",
+    border: "border-zinc-800",
+    accent: "text-zinc-400",
+    hover: "hover:bg-zinc-950",
+    activeBtn: "bg-white text-black",
+    inactiveBtn: "bg-black text-white border-zinc-800",
+    logRowBg: "bg-black",
+    logRowHover: "hover:bg-zinc-950",
+    logRowBorder: "border-zinc-800",
+    expandedBg: "bg-zinc-950 border-l-zinc-600",
+    modalBg: "bg-black",
+  },
+};
 
-function EventSourceToggle({
-  selectedSource,
-  onSourceChange,
-  drainCount,
-  liveCount
+
+const ServiceDropdown = memo(function ServiceDropdown({
+  selectedService,
+  onServiceChange,
+  isOpen,
+  onToggle,
+  services,
+  theme = 'emerald',
 }: {
-  selectedSource: EventSourceType;
-  onSourceChange: (source: EventSourceType) => void;
-  drainCount: number;
-  liveCount: number;
+  selectedService: string;
+  onServiceChange: (service: string) => void;
+  isOpen: boolean;
+  onToggle: () => void;
+  services: string[];
+  theme?: ThemeType;
 }) {
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const themeClasses = THEME_CONFIG[theme];
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        onToggle();
+      }
+    }
+
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isOpen, onToggle]);
+
+  if (!isOpen) return null;
+
   return (
-    <div className="flex items-center bg-zinc-900 rounded-lg p-1 gap-1 border border-zinc-800">
-      <button
-        onClick={() => onSourceChange("drain")}
-        className={`flex-1 px-3 py-2 text-sm rounded-md transition-all flex items-center justify-center gap-2 font-medium ${selectedSource === "drain"
-          ? "bg-zinc-50 text-zinc-900 shadow-sm"
-          : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-          }`}
-      >
-        <div className={`w-2 h-2 rounded-full ${selectedSource === "drain" ? "bg-zinc-900" : "bg-zinc-600"}`}></div>
-        <span>Drain ({drainCount.toLocaleString()})</span>
-      </button>
-      <button
-        onClick={() => onSourceChange("live")}
-        className={`flex-1 px-3 py-2 text-sm rounded-md transition-all flex items-center justify-center gap-2 font-medium ${selectedSource === "live"
-          ? "bg-zinc-50 text-zinc-900 shadow-sm"
-          : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-          }`}
-      >
-        <div className={`w-2 h-2 rounded-full ${selectedSource === "live" ? "bg-zinc-900 animate-pulse" : "bg-zinc-600"}`}></div>
-        <span>Live ({liveCount.toLocaleString()})</span>
-      </button>
+    <div
+      ref={dropdownRef}
+      className={`absolute top-full right-0 mt-1 ${themeClasses.bg} border ${themeClasses.border} rounded shadow-2xl z-20 min-w-[200px] max-h-64 overflow-y-auto`}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {services.map((service) => {
+        const isSelected = selectedService === service;
+        return (
+          <button
+            key={service}
+            className={`w-full text-left px-2 py-1 text-xs ${themeClasses.hover} transition-colors border-b ${themeClasses.border} last:border-b-0 font-mono ${isSelected ? `${themeClasses.hover} ${themeClasses.text}` : themeClasses.accent
+              }`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onServiceChange(service);
+              onToggle();
+            }}
+          >
+            <span
+              className={`w-2 h-2 rounded-full inline-block mr-2 ${isSelected ? themeClasses.text.replace('text-', 'bg-') : themeClasses.accent.replace('text-', 'bg-')
+                }`}
+            ></span>
+            <span className="truncate">{service}</span>
+          </button>
+        );
+      })}
     </div>
   );
-}
+});
 
-function EventTypeDropdown({
+const EventTypeDropdown = memo(function EventTypeDropdown({
   selectedTypes,
   onTypeToggle,
   isOpen,
   onToggle,
-  availableTypes
+  availableTypes,
+  theme = 'emerald',
 }: {
   selectedTypes: string[];
   onTypeToggle: (type: string) => void;
   isOpen: boolean;
   onToggle: () => void;
   availableTypes: string[];
+  theme?: ThemeType;
 }) {
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const themeClasses = THEME_CONFIG[theme];
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -120,18 +212,22 @@ function EventTypeDropdown({
   return (
     <div
       ref={dropdownRef}
-      className="absolute top-full right-0 mt-2 bg-zinc-900 border border-zinc-800 rounded-lg shadow-lg z-20 min-w-[200px] max-h-64 overflow-y-auto"
+      className={`absolute top-full right-0 mt-1 ${themeClasses.bg} border ${themeClasses.border} rounded shadow-2xl z-20 min-w-[200px] max-h-64 overflow-y-auto`}
+      onClick={(e) => e.stopPropagation()}
     >
       <button
-        className={`w-full text-left px-4 py-2.5 text-sm hover:bg-zinc-800 transition-colors flex items-center gap-3 border-b border-zinc-800 ${isAllSelected ? 'bg-zinc-800 text-zinc-50 font-medium' : 'text-zinc-300'
+        className={`w-full text-left px-2 py-1 text-xs ${themeClasses.hover} transition-colors border-b ${themeClasses.border} font-mono ${isAllSelected ? `${themeClasses.hover} ${themeClasses.text}` : themeClasses.accent
           }`}
-        onClick={() => onTypeToggle("All")}
+        onClick={(e) => {
+          e.stopPropagation();
+          onTypeToggle("All");
+        }}
       >
-        <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${isAllSelected ? 'bg-zinc-50 text-zinc-900 border-zinc-50' : 'border-zinc-700'
-          }`}>
-          {isAllSelected ? '✓' : ''}
-        </span>
-        <span>All ({availableTypes.length - 1} types)</span>
+        <span
+          className={`w-2 h-2 rounded-full inline-block mr-2 ${isAllSelected ? themeClasses.text.replace('text-', 'bg-') : themeClasses.accent.replace('text-', 'bg-')
+            }`}
+        ></span>
+        All ({availableTypes.length - 1})
       </button>
 
       {availableTypes.slice(1).map((type) => {
@@ -139,14 +235,17 @@ function EventTypeDropdown({
         return (
           <button
             key={type}
-            className={`w-full text-left px-4 py-2.5 text-sm hover:bg-zinc-800 transition-colors flex items-center gap-3 border-b border-zinc-800 last:border-b-0 ${isSelected ? 'bg-zinc-800 text-zinc-50 font-medium' : 'text-zinc-300'
+            className={`w-full text-left px-2 py-1 text-xs ${themeClasses.hover} transition-colors border-b ${themeClasses.border} last:border-b-0 font-mono ${isSelected ? `${themeClasses.hover} ${themeClasses.text}` : themeClasses.accent
               }`}
-            onClick={() => onTypeToggle(type)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onTypeToggle(type);
+            }}
           >
-            <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${isSelected ? 'bg-zinc-50 text-zinc-900 border-zinc-50' : 'border-zinc-700'
-              }`}>
-              {isSelected ? '✓' : ''}
-            </span>
+            <span
+              className={`w-2 h-2 rounded-full inline-block mr-2 ${isSelected ? themeClasses.text.replace('text-', 'bg-') : themeClasses.accent.replace('text-', 'bg-')
+                }`}
+            ></span>
             <span className="truncate">{type}</span>
           </button>
         );
@@ -154,26 +253,32 @@ function EventTypeDropdown({
 
       {selectedTypes.length > 0 && (
         <button
-          className="w-full text-left px-4 py-2 text-xs text-zinc-400 hover:bg-zinc-800 transition-colors border-t border-zinc-800 font-medium"
-          onClick={() => onTypeToggle("All")}
+          className={`w-full text-left px-2 py-1 text-xs ${themeClasses.accent} ${themeClasses.hover} transition-colors border-t ${themeClasses.border} font-mono`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onTypeToggle("All");
+          }}
         >
-          Clear All
+          CLEAR
         </button>
       )}
     </div>
   );
-}
+});
 
 function JsonPart({
   isOpen,
   onClose,
-  rawMsg
+  rawMsg,
+  theme,
 }: {
   isOpen: boolean;
   onClose: () => void;
   rawMsg: RawMsg | null;
+  theme: ThemeType;
 }) {
   if (!isOpen || !rawMsg) return null;
+  const config = THEME_CONFIG[theme];
 
   const displayValue =
     rawMsg.type === "Structured"
@@ -183,50 +288,40 @@ function JsonPart({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        className={`absolute inset-0 ${config.modalBg} bg-opacity-90 backdrop-blur-sm`}
         onClick={onClose}
       />
-      <div className="relative bg-zinc-900 rounded-lg shadow-2xl max-w-4xl max-h-[80vh] w-full mx-4 flex flex-col border border-zinc-800">
-        <div className="flex items-center justify-between p-4 border-b border-zinc-800">
-          <h3 className="text-lg font-semibold text-zinc-50">Raw JSON Data</h3>
+      <div className={`relative ${config.modalBg} rounded-none shadow-2xl max-w-5xl max-h-[85vh] w-full mx-4 flex flex-col border ${config.border}`}>
+        <div className={`flex items-center justify-between p-3 border-b ${config.border}`}>
+          <h3 className={`${config.text} font-mono text-xs`}><span className={config.accent}>$</span> view_event_data</h3>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-50 transition-colors"
+            className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+
           >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M6 18L18 6M6 6l12 12"
-              />
-            </svg>
+            ×
           </button>
         </div>
 
-        <div className="flex-1 overflow-auto p-4 bg-zinc-950">
-          <pre className="bg-black text-xs text-green-400 p-4 rounded border border-zinc-800 font-mono overflow-auto">
+        <div className="flex-1 overflow-auto p-4">
+          <pre className={`${config.text} text-xs font-mono overflow-auto leading-relaxed whitespace-pre-wrap break-words`}>
             {displayValue}
           </pre>
         </div>
 
-        <div className="flex justify-end gap-2 p-4 border-t border-zinc-800">
+        <div className={`flex justify-end gap-2 p-3 border-t ${config.border}`}>
           <button
             onClick={() => navigator.clipboard.writeText(displayValue)}
-            className="px-4 py-2 text-sm bg-zinc-50 text-zinc-900 rounded-md hover:bg-zinc-200 transition-colors font-medium"
+            className={`px-3 py-1 text-xs border ${config.border} ${config.text} ${config.hover} transition-colors font-mono`}
           >
-            Copy JSON
+            [COPY]
           </button>
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm bg-zinc-800 text-zinc-50 rounded-md hover:bg-zinc-700 transition-colors font-medium"
+            className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+
           >
-            Close
+            [EXIT]
           </button>
         </div>
       </div>
@@ -279,134 +374,103 @@ const ParseTimeStamp = (timestamp: string, logIndex: number = 0): number => {
   }
 };
 
-function LogCardThingy({
+const TableLogRow = memo(function TableLogRow({
   log,
   isExpanded,
   onToggle,
   onViewJson,
+  theme,
 }: {
   log: EventData;
   isExpanded: boolean;
   onToggle: () => void;
   onViewJson: (rawMsg: RawMsg, e: React.MouseEvent) => void;
+  theme: ThemeType;
 }) {
-  const getEventColor = (eventType: string) => {
-    const type = eventType.toLowerCase();
-    if (type.includes("error") || type.includes("incorrect")) return "error";
-    if (type.includes("failure")) return "failure";
-    if (type.includes("warn")) return "warn";
-    return "info";
-  };
+  const config = THEME_CONFIG[theme];
+  const message = useMemo(() => {
+    return typeof log.raw_msg === "string"
+      ? log.raw_msg
+      : log.raw_msg.type === "Structured"
+        ? log.raw_msg.value.MESSAGE
+        : log.raw_msg.value;
+  }, [log.raw_msg]);
 
-  const eventColorClass = getEventColor(log.event_type);
-  const message = typeof log.raw_msg === "string"
-    ? log.raw_msg
-    : log.raw_msg.type === "Structured"
-      ? log.raw_msg.value.MESSAGE
-      : log.raw_msg.value;
+  const dataEntries = useMemo(() => Object.entries(log.data), [log.data]);
+
+  const isError = useMemo(() => {
+    const type = log.event_type.toLowerCase();
+    return type.includes("error") || type.includes("fail") || type.includes("denied");
+  }, [log.event_type]);
+
+  const isWarning = useMemo(() => {
+    const type = log.event_type.toLowerCase();
+    return type.includes("warn") || type.includes("attempt");
+  }, [log.event_type]);
+
+  const textColor = isError ? "text-red-500" : isWarning ? "text-yellow-500" : config.text;
 
   return (
-    <div className="border-b border-zinc-800 hover:bg-zinc-900/50 transition-colors">
-      <div className="flex items-start gap-3 px-4 py-3">
-        <button
-          onClick={onToggle}
-          className="flex-shrink-0 mt-1 p-1 hover:bg-zinc-800 rounded transition-colors"
-        >
-          <svg
-            className={`w-4 h-4 text-zinc-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </button>
-
-        {/* Timestamp Column */}
-        <div className="flex-shrink-0 w-32 pt-1">
-          <div className="text-xs text-zinc-500 font-mono">
-            {log.timestamp}
-          </div>
-        </div>
-
-        {/* Main Content */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap mb-1.5">
-            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${eventColorClass === 'error' ? 'bg-red-500/10 text-red-400 border border-red-500/20' :
-              eventColorClass === 'failure' ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' :
-                eventColorClass === 'warn' ? 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20' :
-                  'bg-blue-500/10 text-blue-400 border border-blue-500/20'
-              }`}>
+    <>
+      <div
+        onClick={onToggle}
+        className={`cursor-pointer px-3 py-2 transition-colors font-mono text-xs ${textColor} ${isExpanded ? config.logRowHover : config.logRowHover} border-b ${config.logRowBorder}`}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1 min-w-0">
+            <span className={config.accent}>[{String(log.service).padEnd(12)}]</span>
+            <span className={config.accent}>{" > "}</span>
+            <span className={`${config.accent} opacity-70`}>{log.timestamp}</span>
+            <span className={config.accent}>{" | "}</span>
+            <span className={isError ? "text-red-500" : isWarning ? "text-yellow-500" : "text-cyan-400"}>
               {log.event_type}
             </span>
-            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-zinc-800 text-zinc-300 border border-zinc-700">
-              {log.service}
-            </span>
-            {Object.entries(log.data).map(([key, value]) => (
-              <span key={key} className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                <span className="font-semibold">{key}:</span>
-                <span className="ml-1">{value}</span>
-              </span>
-            ))}
+            <span className={config.accent}>{" >> "}</span>
+            <span className={textColor}>{message.substring(0, 60)}</span>
+            {message.length > 60 && <span className={config.accent}>...</span>}
           </div>
-
-          {/* Message text */}
-          <div className="text-sm text-zinc-300 leading-relaxed">
-            {message}
-          </div>
-
-          {/* Expanded view */}
-          {isExpanded && (
-            <div className="mt-3 p-3 bg-zinc-900 border border-zinc-800 rounded-lg text-xs">
-              <div className="space-y-2">
-                <div className="flex">
-                  <span className="font-semibold text-zinc-500 w-24">Timestamp:</span>
-                  <span className="text-zinc-300 font-mono">{log.timestamp}</span>
-                </div>
-                <div className="flex">
-                  <span className="font-semibold text-zinc-500 w-24">Service:</span>
-                  <span className="text-zinc-300">{log.service}</span>
-                </div>
-                <div className="flex">
-                  <span className="font-semibold text-zinc-500 w-24">Event Type:</span>
-                  <span className="text-zinc-300">{log.event_type}</span>
-                </div>
-                {Object.entries(log.data).length > 0 && (
-                  <div className="flex">
-                    <span className="font-semibold text-zinc-500 w-24">Data:</span>
-                    <div className="flex-1">
-                      {Object.entries(log.data).map(([key, value]) => (
-                        <div key={key} className="mb-1">
-                          <span className="text-purple-400 font-semibold">{key}:</span>{' '}
-                          <span className="text-zinc-300">{value}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <div className="flex">
-                  <span className="font-semibold text-zinc-500 w-24">Message:</span>
-                  <span className="text-zinc-300 flex-1 break-words">{message}</span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="flex-shrink-0 flex items-start gap-2 pt-1">
           <button
-            onClick={(e) => onViewJson(log.raw_msg, e)}
-            className="px-3 py-1 text-xs bg-zinc-50 text-zinc-900 rounded-md hover:bg-zinc-200 transition-colors font-medium border border-zinc-700"
+            onClick={(e) => {
+              e.stopPropagation();
+              onViewJson(log.raw_msg, e);
+            }}
+            className={`ml-4 ${config.accent} hover:${config.text} transition-colors flex-shrink-0 font-mono text-xs whitespace-nowrap`}
           >
-            JSON
+            [INSPECT]
           </button>
         </div>
       </div>
-    </div>
+
+      {isExpanded && (
+        <div className={`${config.expandedBg} border-b ${config.logRowBorder} border-l-2 pl-3 py-2 px-3 font-mono text-xs ${config.text}`}>
+          <div className={`${config.accent} mb-2`}>
+            <span className={`${config.accent} opacity-60`}>└─</span> EVENT_DETAILS:
+          </div>
+
+          {dataEntries.length > 0 && (
+            <div className="ml-2 space-y-1 mb-2">
+              {dataEntries.map(([key, value]) => (
+                <div key={key} className={config.text}>
+                  <span className={config.accent}>├─</span>
+                  <span className="text-cyan-400">{key}</span>
+                  <span className={config.accent}>: </span>
+                  <span className={`${config.text} break-words`}>{value}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+        </div>
+      )}
+    </>
   );
-}
+});
 
 export default function Dashboard() {
+  const [theme, setTheme] = useState<ThemeType>(() => {
+    return (localStorage.getItem('drashta_theme') || "emerald") as ThemeType;
+  });
+
   const [prefetchedNext, setPrefetchedNext] = useState<{
     logs: EventData[];
     cursor: string | null;
@@ -417,13 +481,36 @@ export default function Dashboard() {
     cursor: string | null;
   } | null>(null);
 
+  const [searchTerm, setSearchTerm] = useState(() => {
+    return localStorage.getItem('drashta_searchTerm') || "";
+  });
+
+  const [activeQuery, setActiveQuery] = useState(() => {
+    return localStorage.getItem('drashta_activeQuery') || "";
+  });
+
   const [drainLogs, setDrainLogs] = useState<EventData[]>([]);
   const [liveLogs, setLiveLogs] = useState<EventData[]>([]);
-  const [selectedSource, setSelectedSource] = useState<EventSourceType>("drain");
-  const [selectedService, setSelectedService] = useState("All");
-  const [selectedType, setSelectedType] = useState<string[]>([]);
+
+  const [selectedSource, setSelectedSource] = useState<EventSourceType>(() => {
+    return (localStorage.getItem('drashta_selectedSource') || "drain") as EventSourceType;
+  });
+
+  const [selectedService, setSelectedService] = useState(() => {
+    return localStorage.getItem('drashta_selectedService') || "All";
+  });
+
+  const [selectedType, setSelectedType] = useState<string[]>(() => {
+    const saved = localStorage.getItem('drashta_selectedType');
+    try {
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isServiceDropdownOpen, setIsServiceDropdownOpen] = useState(false);
+  const [allAvailableTypes, setAllAvailableTypes] = useState<string[]>(["All"]);
   const [currentEventSource, setCurrentEventSource] = useState<EventSource | null>(null);
-  const [searchTerm, setSearchTerm] = useState("");
   const [jsonModal, setJsonPart] = useState<{ isOpen: boolean; rawMsg: RawMsg | null }>({
     isOpen: false,
     rawMsg: null,
@@ -434,19 +521,31 @@ export default function Dashboard() {
 
   const [cursor, setCursor] = useState<string | null>(null);
   const [pageSize, _setPageSize] = useState<number>(500);
-  const [currentPage, setCurrentPage] = useState<number>(0);
+
+  const [currentPage, setCurrentPage] = useState<number>(() => {
+    const saved = localStorage.getItem('drashta_currentPage');
+    return saved ? parseInt(saved) : 0;
+  });
+
   const [_isFetching, setIsFetching] = useState(false);
 
   const [typeDropdownOpen, setEventTypeDropdownOpen] = useState(false);
-  const [selectedTimeRange, setSelectedTimeRange] = useState(43200);
-  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+
+  const [selectedTimeRange, setSelectedTimeRange] = useState(() => {
+    const saved = localStorage.getItem('drashta_selectedTimeRange');
+    return saved ? parseInt(saved) : 43200;
+  });
+
+  const [sortDirection, setSortDirection] = useState<SortDirection>(() => {
+    return (localStorage.getItem('drashta_sortDirection') || "desc") as SortDirection;
+  });
+
   const [showAnalytics, setShowAnalytics] = useState(false);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const parentRef = useRef<HTMLDivElement>(null);
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [_sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const sidebarResizeRef = useRef({
     isResizing: false,
@@ -456,34 +555,166 @@ export default function Dashboard() {
 
   const [cursorStack, setCursorStack] = useState<string[]>([]);
   const [expandedLogs, setExpandedLogs] = useState<Set<number>>(new Set());
+
   const eventName = selectedService === "All" ? "all.events" : `${selectedService.toLowerCase()}.events`;
   const currentLogs = selectedSource === "drain" ? drainLogs : liveLogs;
 
+  useEffect(() => {
+    localStorage.setItem('drashta_searchTerm', searchTerm);
+  }, [searchTerm]);
+
+  useEffect(() => {
+    localStorage.setItem('drashta_activeQuery', activeQuery);
+  }, [activeQuery]);
+
+  useEffect(() => {
+    localStorage.setItem('drashta_selectedSource', selectedSource);
+  }, [selectedSource]);
+
+  useEffect(() => {
+    localStorage.setItem('drashta_selectedService', selectedService);
+  }, [selectedService]);
+
+  useEffect(() => {
+    localStorage.setItem('drashta_selectedType', JSON.stringify(selectedType));
+  }, [selectedType]);
+
+  useEffect(() => {
+    localStorage.setItem('drashta_currentPage', currentPage.toString());
+  }, [currentPage]);
+
+  useEffect(() => {
+    localStorage.setItem('drashta_selectedTimeRange', selectedTimeRange.toString());
+  }, [selectedTimeRange]);
+
+  useEffect(() => {
+    if (sortDirection) {
+      localStorage.setItem('drashta_sortDirection', sortDirection);
+    }
+  }, [sortDirection]);
+
+  useEffect(() => {
+    localStorage.setItem('drashta_theme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (selectedSource === "live") {
+      setSelectedTimeRange(15);
+    } else {
+      setSelectedTimeRange(43200);
+    }
+  }, [selectedSource]);
+
+  const buildQueryParams = useCallback((
+    baseParams: Record<string, string | string[] | undefined>
+  ) => {
+    const params = new URLSearchParams();
+
+    for (const key in baseParams) {
+      const value = baseParams[key];
+      if (Array.isArray(value)) {
+        value.forEach(v => params.append(key, v));
+      } else if (value) {
+        params.append(key, value);
+      }
+    }
+
+    if (activeQuery && activeQuery.trim() !== "") {
+      params.append("query", activeQuery.trim());
+    }
+
+    return params.toString();
+  }, [activeQuery]);
+
+  useEffect(() => {
+    if (currentLogs.length > 0) {
+      const uniqueTypes = [...new Set(currentLogs.map(log => log.event_type))].sort();
+      setAllAvailableTypes(["All", ...uniqueTypes]);
+    }
+  }, [currentLogs]);
+
+  useEffect(() => {
+    if (selectedSource !== "live") {
+      if (currentEventSource) {
+        currentEventSource.close();
+        setCurrentEventSource(null);
+      }
+      return;
+    }
+
+    let eventSource: EventSource | null = null;
+    let reconnectTimer: number | null = null;
+
+    const connect = () => {
+      const url = `http://localhost:3200/live?event_name=${encodeURIComponent(eventName)}`;
+      const es = new EventSource(url);
+
+      es.onopen = () => {
+        if (reconnectTimer !== null) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+      };
+
+      es.onmessage = (event) => {
+        try {
+          const logData: EventData = JSON.parse(event.data);
+          setLiveLogs((prev) => [logData, ...prev]);
+        } catch (err) {
+          console.error("Error parsing message:", err);
+        }
+      };
+
+      es.addEventListener("log", (event) => {
+        try {
+          const logData: EventData = JSON.parse((event as MessageEvent).data);
+          setLiveLogs((prev) => [logData, ...prev]);
+        } catch (err) {
+          console.error("Error parsing log event:", err);
+        }
+      });
+
+      es.onerror = () => {
+        console.error("⚠️ EventSource error, reconnecting in 3s...");
+        es.close();
+
+        reconnectTimer = window.setTimeout(() => {
+          connect();
+        }, 3000);
+      };
+
+      eventSource = es;
+      setCurrentEventSource(es);
+    };
+
+    connect();
+
+    return () => {
+      if (eventSource) eventSource.close();
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+    };
+  }, [selectedSource, eventName]);
 
   const handleDateRangeApply = (mode: 'relative' | 'absolute', value: number | { start: Date; end: Date }) => {
     setDateRangeMode(mode);
-
     if (mode === 'relative') {
       setSelectedTimeRange(value as number);
       setAbsoluteDateRange(null);
     } else {
       const range = value as { start: Date; end: Date };
       setAbsoluteDateRange(range);
-
       const diffMs = range.end.getTime() - range.start.getTime();
       const diffMinutes = Math.ceil(diffMs / (1000 * 60));
       setSelectedTimeRange(diffMinutes);
     }
+    setDateRangeDropdownOpen(false);
   };
-
 
   const extractCursor = useCallback((dataLine: string): string | null => {
     try {
       const parsed = JSON.parse(dataLine);
       const cursorData = parsed.cursor;
-
       if (!cursorData) return null;
-
       return JSON.stringify(cursorData);
     } catch (err) {
       console.error("Error parsing cursor:", err);
@@ -494,9 +725,13 @@ export default function Dashboard() {
   const fetchInitialDrain = useCallback(async () => {
     setIsFetching(true);
     try {
-      const res = await fetch(
-        `http://localhost:3200/drain?event_name=${encodeURIComponent(eventName)}&limit=${pageSize}`
-      );
+      const queryParams = buildQueryParams({
+        event_name: eventName,
+        limit: pageSize.toString(),
+        event_type: selectedType.length > 0 ? selectedType : undefined,
+      });
+
+      const res = await fetch(`http://localhost:3200/drain?${queryParams}`);
       if (!res.ok) throw new Error(`Failed to fetch drain: ${res.status}`);
       const text = await res.text();
 
@@ -521,29 +756,51 @@ export default function Dashboard() {
       setCursor(newCursor);
       setCurrentPage(0);
       setCursorStack([]);
+      setPrefetchedNext({ logs: [], cursor: null });
+      setPrefetchedPrev(null);
+
+      if (newCursor) {
+        prefetchNextPage(newCursor);
+      }
     } catch (err) {
       console.error("Error fetching drain:", err);
     } finally {
       setIsFetching(false);
     }
-  }, [eventName, pageSize]);
+  }, [eventName, pageSize, buildQueryParams, extractCursor, activeQuery, selectedType]);
 
+  const handleSearchSubmit = useCallback(() => {
+    const trimmedQuery = searchTerm.trim();
+
+    if (activeQuery === trimmedQuery) return;
+
+    setDrainLogs([]);
+    setCursor(null);
+    setCurrentPage(0);
+    setCursorStack([]);
+    setPrefetchedNext({ logs: [], cursor: null });
+    setPrefetchedPrev(null);
+
+    setActiveQuery(trimmedQuery);
+  }, [searchTerm, activeQuery]);
 
   const prefetchPreviousPage = useCallback(
     async () => {
       if (cursorStack.length === 0) return;
-
-      if (currentPage === 1) {
-        return;
-      }
+      if (currentPage === 1) return;
 
       const previousCursor = cursorStack[cursorStack.length - 1];
       if (prefetchedPrev?.cursor === previousCursor) return;
 
       try {
-        const res = await fetch(
-          `http://localhost:3200/previous?event_name=${encodeURIComponent(eventName)}&cursor=${encodeURIComponent(previousCursor)}&limit=${pageSize}`
-        );
+        const queryParams = buildQueryParams({
+          event_name: eventName,
+          cursor: previousCursor,
+          limit: pageSize.toString(),
+          event_type: selectedType.length > 0 ? selectedType : undefined,
+        });
+
+        const res = await fetch(`http://localhost:3200/previous?${queryParams}`);
         if (!res.ok) return;
         const text = await res.text();
 
@@ -567,7 +824,7 @@ export default function Dashboard() {
         console.error("Error prefetching previous page:", err);
       }
     },
-    [eventName, pageSize, cursorStack, currentPage, prefetchedPrev?.cursor]
+    [eventName, pageSize, cursorStack, currentPage, prefetchedPrev?.cursor, buildQueryParams, selectedType]
   );
 
   const fetchPreviousPage = useCallback(
@@ -584,10 +841,8 @@ export default function Dashboard() {
 
         if (prefetchedPrev && prefetchedPrev.logs.length > 0) {
           setDrainLogs(prefetchedPrev.logs);
-
           const newStack = cursorStack.slice(0, -1);
           setCursorStack(newStack);
-
           setCursor(prefetchedPrev.cursor);
           setCurrentPage((prev) => Math.max(prev - 1, 0));
           setPrefetchedPrev(null);
@@ -596,10 +851,14 @@ export default function Dashboard() {
         }
 
         const previousCursor = cursorStack[cursorStack.length - 1];
+        const queryParams = buildQueryParams({
+          event_name: eventName,
+          cursor: previousCursor,
+          limit: pageSize.toString(),
+          event_type: selectedType.length > 0 ? selectedType : undefined,
+        });
 
-        const res = await fetch(
-          `http://localhost:3200/previous?event_name=${encodeURIComponent(eventName)}&cursor=${encodeURIComponent(previousCursor)}&limit=${pageSize}`
-        );
+        const res = await fetch(`http://localhost:3200/previous?${queryParams}`);
         if (!res.ok) throw new Error(`Failed to fetch previous: ${res.status}`);
         const text = await res.text();
 
@@ -619,7 +878,6 @@ export default function Dashboard() {
         });
 
         setDrainLogs(logs);
-
         const newStack = cursorStack.slice(0, -1);
         setCursorStack(newStack);
         setCursor(previousCursor);
@@ -630,17 +888,23 @@ export default function Dashboard() {
         setIsFetching(false);
       }
     },
-    [eventName, pageSize, cursorStack, currentPage, prefetchedPrev, fetchInitialDrain]
+    [eventName, pageSize, cursorStack, currentPage, prefetchedPrev, fetchInitialDrain, buildQueryParams, selectedType]
   );
 
   const prefetchNextPage = useCallback(
     async (cursorValue: string) => {
-      if (!cursorValue || prefetchedNext.cursor) return;
+      if (!cursorValue) return;
+      if (prefetchedNext.cursor === cursorValue) return;
 
       try {
-        const res = await fetch(
-          `http://localhost:3200/older?event_name=${encodeURIComponent(eventName)}&cursor=${encodeURIComponent(cursorValue)}&limit=${pageSize}`
-        );
+        const queryParams = buildQueryParams({
+          event_name: eventName,
+          cursor: cursorValue,
+          limit: pageSize.toString(),
+          event_type: selectedType.length > 0 ? selectedType : undefined,
+        });
+
+        const res = await fetch(`http://localhost:3200/older?${queryParams}`);
         if (!res.ok) return;
         const text = await res.text();
 
@@ -666,7 +930,7 @@ export default function Dashboard() {
         console.error("Error prefetching next page:", err);
       }
     },
-    [eventName, pageSize, prefetchedNext]
+    [eventName, pageSize, extractCursor, prefetchedNext.cursor, buildQueryParams, selectedType]
   );
 
   const fetchOlderPage = useCallback(
@@ -692,9 +956,14 @@ export default function Dashboard() {
           return;
         }
 
-        const res = await fetch(
-          `http://localhost:3200/older?event_name=${encodeURIComponent(eventName)}&cursor=${encodeURIComponent(cursorValue)}&limit=${pageSize}`
-        );
+        const queryParams = buildQueryParams({
+          event_name: eventName,
+          cursor: cursorValue,
+          limit: pageSize.toString(),
+          event_type: selectedType.length > 0 ? selectedType : undefined,
+        });
+
+        const res = await fetch(`http://localhost:3200/older?${queryParams}`);
         if (!res.ok) throw new Error(`Failed to fetch older: ${res.status}`);
         const text = await res.text();
 
@@ -734,42 +1003,15 @@ export default function Dashboard() {
         setIsFetching(false);
       }
     },
-    [eventName, pageSize, prefetchedNext, extractCursor, prefetchNextPage]
+    [eventName, pageSize, prefetchedNext, extractCursor, prefetchNextPage, buildQueryParams, selectedType]
   );
-
-  const availableTypes = useMemo(() => {
-    let relevantLogs = currentLogs;
-    if (selectedService !== "All") {
-      relevantLogs = currentLogs.filter(
-        log => log.service.toLowerCase() === selectedService.toLowerCase()
-      );
-    }
-
-    const uniqueTypes = [...new Set(relevantLogs.map(log => log.event_type))].sort();
-    return ["All", ...uniqueTypes];
-  }, [currentLogs, selectedService]);
-
-  useEffect(() => {
-    if (
-      selectedType.length > 0 &&
-      !selectedType.every(type => availableTypes.includes(type))
-    ) {
-      setSelectedType([]);
-    }
-  }, [availableTypes, selectedType]);
 
   const handleGlobalKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.target === searchInputRef.current || e.ctrlKey || e.altKey || e.metaKey) {
       return;
     }
 
-    if (e.shiftKey && e.key.toLowerCase() === "s") {
-      e.preventDefault();
-      searchInputRef.current?.focus();
-      return;
-    }
-
-    if (e.key === "/") {
+    if (e.key.toLowerCase() === 's' || e.key === '/') {
       e.preventDefault();
       searchInputRef.current?.focus();
       return;
@@ -786,7 +1028,10 @@ export default function Dashboard() {
   const toggleTypeSelection = useCallback((type: string) => {
     setSelectedType(prev => {
       if (type === "All") return [];
-      if (prev.includes(type)) return prev.filter(t => t !== type);
+
+      if (prev.includes(type)) {
+        return prev.filter(t => t !== type);
+      }
       return [...prev, type];
     });
   }, []);
@@ -799,7 +1044,6 @@ export default function Dashboard() {
     });
   }, []);
 
-
   const handleNextPage = useCallback(() => {
     if (!cursor) return;
     fetchOlderPage(cursor);
@@ -809,40 +1053,17 @@ export default function Dashboard() {
     fetchPreviousPage();
   }, [fetchPreviousPage]);
 
-  function PaginationBar() {
-    return (
-      <div className="flex items-center gap-2">
-        <button
-          onMouseEnter={() => prefetchPreviousPage()}
-          onClick={handlePrevPage}
-          disabled={currentPage === 0}
-          className="px-3 py-1.5 text-sm bg-zinc-900 text-zinc-300 rounded-md border border-zinc-800 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-        >
-          Previous
-        </button>
-        <div className="text-sm text-zinc-400 px-2">
-          Page {currentPage + 1}
-        </div>
-        <button
-          onMouseEnter={() => cursor && prefetchNextPage(cursor)}
-          onClick={handleNextPage}
-          disabled={!cursor}
-          className="px-3 py-1.5 text-sm bg-zinc-900 text-zinc-300 rounded-md border border-zinc-800 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-        >
-          Next
-        </button>
-      </div>
-    );
-  }
-
   useEffect(() => {
     if (selectedSource === "drain") {
-      setDrainLogs([]);
-      setCursor(null);
-      setCurrentPage(0);
       fetchInitialDrain();
     }
-  }, [selectedSource, fetchInitialDrain]);
+  }, [selectedSource, activeQuery, selectedService, selectedType, fetchInitialDrain]);
+
+  useEffect(() => {
+    if (selectedSource === "live") {
+      setSelectedTimeRange(15);
+    }
+  }, [selectedSource]);
 
   const filteredAndSortedLogs = useMemo(() => {
     let startTime: number;
@@ -857,25 +1078,21 @@ export default function Dashboard() {
     }
 
     let filtered = currentLogs.filter((log, index) => {
-      if (selectedService !== "All" && log.service !== selectedService) return false;
-
-      if (selectedType.length > 0) {
-        const logTypeLower = log.event_type.toLowerCase();
-        const selectedLower = selectedType.map(t => t.toLowerCase());
-        if (!selectedLower.includes(logTypeLower)) return false;
+      if (selectedService !== "All" &&
+        log.service.toLowerCase() !== selectedService.toLowerCase()) {
+        return false;
       }
 
-      if (
-        searchTerm &&
-        !Object.values(log)
-          .join(" ")
-          .toLowerCase()
-          .includes(searchTerm.toLowerCase())
-      )
-        return false;
+      if (selectedSource === "live" && selectedType.length > 0) {
+        if (!selectedType.includes(log.event_type)) {
+          return false;
+        }
+      }
 
       const logTime = ParseTimeStamp(log.timestamp, index);
-      if (logTime !== 0 && (logTime < startTime || logTime > endTime)) return false;
+      if (logTime !== 0 && (logTime < startTime || logTime > endTime)) {
+        return false;
+      }
 
       return true;
     });
@@ -893,28 +1110,20 @@ export default function Dashboard() {
             : b.timestamp.localeCompare(a.timestamp);
         }
 
-        if (sortDirection === "asc") {
-          return timeA - timeB;
-        } else {
-          return timeB - timeA;
-        }
+        return sortDirection === "asc" ? timeA - timeB : timeB - timeA;
       });
     }
 
     return filtered;
-  }, [currentLogs, selectedService, selectedType, searchTerm, sortDirection, selectedTimeRange, dateRangeMode, absoluteDateRange]);
+  }, [currentLogs, selectedService, selectedType, selectedSource, sortDirection, selectedTimeRange, dateRangeMode, absoluteDateRange]);
 
   const handleSourceChange = (source: EventSourceType) => {
+    if (currentEventSource) {
+      currentEventSource.close();
+      setCurrentEventSource(null);
+    }
     setSelectedSource(source);
     setSelectedType([]);
-  };
-
-  const clearCurrentLogs = () => {
-    if (selectedSource === "drain") {
-      setDrainLogs([]);
-    } else {
-      setLiveLogs([]);
-    }
   };
 
   const handleRefresh = useCallback(() => {
@@ -923,23 +1132,12 @@ export default function Dashboard() {
       fetchInitialDrain();
     } else {
       setLiveLogs([]);
-    }
-    if (currentEventSource) {
-      currentEventSource.close();
-      setCurrentEventSource(null);
+      if (currentEventSource) {
+        currentEventSource.close();
+        setCurrentEventSource(null);
+      }
     }
   }, [selectedSource, currentEventSource, fetchInitialDrain]);
-
-  const handleSidebarMouseDown = useCallback((e: React.MouseEvent) => {
-    if (sidebarCollapsed) return;
-    e.preventDefault();
-    setIsResizingSidebar(true);
-    sidebarResizeRef.current = {
-      isResizing: true,
-      startX: e.clientX,
-      startWidth: sidebarWidth
-    };
-  }, [sidebarWidth, sidebarCollapsed]);
 
   const handleSidebarMouseMove = useCallback((e: MouseEvent) => {
     if (!sidebarResizeRef.current.isResizing) return;
@@ -982,11 +1180,7 @@ export default function Dashboard() {
     setJsonPart({ isOpen: false, rawMsg: null });
   };
 
-  const toggleSidebar = () => {
-    setSidebarCollapsed(!sidebarCollapsed);
-  };
-
-  const toggleLogExpansion = (index: number) => {
+  const toggleLogExpansion = useCallback((index: number) => {
     setExpandedLogs(prev => {
       const newSet = new Set(prev);
       if (newSet.has(index)) {
@@ -996,427 +1190,251 @@ export default function Dashboard() {
       }
       return newSet;
     });
-  };
+  }, []);
 
   const rowVirtualizer = useVirtualizer({
     count: filteredAndSortedLogs.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 80,
-    measureElement: (el) => el.getBoundingClientRect().height,
-    overscan: 5,
+    estimateSize: () => 50,
+    overscan: 10,
+    measureElement: typeof window !== 'undefined' && navigator.userAgent.indexOf('Firefox') === -1
+      ? element => element?.getBoundingClientRect().height
+      : undefined,
   });
 
   const getSelectedTimeRangeLabel = () => {
     const range = TIME_RANGES.find(r => r.value === selectedTimeRange);
     return range ? range.label : "Last 15 minutes";
   };
+  const config = THEME_CONFIG[theme];
+  const [themeDropdownOpen, setThemeDropdownOpen] = useState(false);
 
   return (
-    <>
-      <style>{`
-      body {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      }
-      
-      .shadcn-scrollbar::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
-      }
-      .shadcn-scrollbar::-webkit-scrollbar-track {
-        background: transparent;
-      }
-      .shadcn-scrollbar::-webkit-scrollbar-thumb {
-        background: #52525b;
-        border-radius: 4px;
-      }
-      .shadcn-scrollbar::-webkit-scrollbar-thumb:hover {
-        background: #71717a;
-      }
-      
-      /* Modern DatePicker Styles */
-      .react-datepicker {
-        background-color: #18181b !important;
-        border: 1px solid rgba(63, 63, 70, 0.5) !important;
-        border-radius: 12px !important;
-        font-family: inherit;
-        box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-      }
-      .react-datepicker__header {
-        background-color: #09090b !important;
-        border-bottom: 1px solid #27272a !important;
-        border-radius: 12px 12px 0 0 !important;
-        padding-top: 12px;
-      }
-      .react-datepicker__current-month {
-        color: #fafafa !important;
-        font-weight: 700 !important;
-        font-size: 0.875rem !important;
-      }
-      .react-datepicker__day-name {
-        color: #71717a !important;
-        font-weight: 700 !important;
-        font-size: 0.7rem !important;
-      }
-      .react-datepicker__day {
-        color: #e4e4e7 !important;
-        border-radius: 8px !important;
-        margin: 3px !important;
-        font-weight: 500 !important;
-      }
-      .react-datepicker__day:hover {
-        background-color: #27272a !important;
-        color: #ffffff !important;
-      }
-      .react-datepicker__day--selected {
-        background-color: white !important;
-        color: black !important;
-        font-weight: 700 !important;
-      }
-      .react-datepicker__day--keyboard-selected {
-        background-color: #3f3f46 !important;
-        color: white !important;
-      }
-      .react-datepicker__day--disabled {
-        color: #3f3f46 !important;
-      }
-      .react-datepicker__time-container {
-        border-left: 1px solid #27272a !important;
-      }
-      .react-datepicker__time {
-        background-color: #18181b !important;
-        border-radius: 0 0 12px 0 !important;
-      }
-      .react-datepicker__time-list {
-        scrollbar-width: thin;
-        scrollbar-color: #52525b transparent;
-      }
-      .react-datepicker__time-list::-webkit-scrollbar {
-        width: 6px;
-      }
-      .react-datepicker__time-list::-webkit-scrollbar-track {
-        background: transparent;
-      }
-      .react-datepicker__time-list::-webkit-scrollbar-thumb {
-        background: #52525b;
-        border-radius: 3px;
-      }
-      .react-datepicker__time-list-item {
-        color: #e4e4e7 !important;
-        font-weight: 500 !important;
-        padding: 8px 12px !important;
-      }
-      .react-datepicker__time-list-item:hover {
-        background-color: #27272a !important;
-        color: #ffffff !important;
-      }
-      .react-datepicker__time-list-item--selected {
-        background-color: white !important;
-        color: black !important;
-        font-weight: 700 !important;
-      }
-      .react-datepicker__navigation {
-        top: 14px;
-      }
-      .react-datepicker__navigation-icon::before {
-        border-color: #71717a !important;
-        border-width: 2px 2px 0 0 !important;
-      }
-      .react-datepicker__navigation:hover .react-datepicker__navigation-icon::before {
-        border-color: #fafafa !important;
-      }
-    `}</style>
-
-      <div className="flex h-screen bg-black text-zinc-50 overflow-hidden flex-col">
-        <div className="bg-zinc-950 border-b border-zinc-800 px-6 py-2.5 flex items-center justify-between flex-shrink-0">
-          <div className="flex-1 max-w-2xl">
+    <div className={`h-screen ${config.bg} flex flex-col overflow-hidden font-mono ${config.text}`}>
+      <div className={`${config.bg} border-b ${config.border} px-4 py-2 shadow-lg`}>
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <div className="flex-1">
             <input
               ref={searchInputRef}
-              type="text"
-              placeholder="Search logs... (Press / or Shift+S)"
-              className="w-full bg-zinc-900 placeholder-zinc-500 text-sm px-4 py-2 rounded-lg border border-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-700 focus:border-transparent text-zinc-50"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSearchSubmit()}
+              placeholder="$ Type 'S' or '/' to search"
+              className={`w-full px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs placeholder-opacity-50 focus:outline-none focus:ring-1 focus:ring-opacity-50 font-mono`}
             />
           </div>
 
-          <div className="flex items-center gap-2 ml-4">
+          <div className="flex gap-1">
+            <div className="relative">
+              <button
+                onClick={() => setIsServiceDropdownOpen(!isServiceDropdownOpen)}
+                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs focus:outline-none font-mono hover:opacity-80 transition-colors min-w-[120px] text-left`}
+              >
+                {selectedService}
+              </button>
+
+              <ServiceDropdown
+                selectedService={selectedService}
+                onServiceChange={setSelectedService}
+                isOpen={isServiceDropdownOpen}
+                onToggle={() => setIsServiceDropdownOpen(false)}
+                services={SERVICES}
+                theme={theme}
+              />
+            </div>
+
+            <div className="relative">
+              <button
+                onClick={() => setEventTypeDropdownOpen(!typeDropdownOpen)}
+                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+
+              >
+                [TYPES]
+              </button>
+              <EventTypeDropdown
+                selectedTypes={selectedType}
+                onTypeToggle={toggleTypeSelection}
+                isOpen={typeDropdownOpen}
+                onToggle={() => setEventTypeDropdownOpen(false)}
+                availableTypes={allAvailableTypes}
+                theme={theme}
+              />
+            </div>
+
             <div className="relative">
               <button
                 onClick={() => setDateRangeDropdownOpen(!dateRangeDropdownOpen)}
-                className="flex items-center gap-2 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg hover:bg-zinc-800 hover:border-zinc-700 transition-all text-sm"
+                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
               >
-                <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                </svg>
-                <span className="text-zinc-300 font-medium">{getSelectedTimeRangeLabel()}</span>
+                [{getSelectedTimeRangeLabel().substring(0, 8)}]
               </button>
               <DateRangePicker
                 isOpen={dateRangeDropdownOpen}
                 onClose={() => setDateRangeDropdownOpen(false)}
                 onApply={handleDateRangeApply}
                 selectedRange={selectedTimeRange}
+                theme={theme}
               />
             </div>
 
             <button
-              onClick={handleRefresh}
-              className="p-2 bg-zinc-900 border border-zinc-800 rounded-lg hover:bg-zinc-800 hover:border-zinc-700 transition-all"
-              title="Refresh"
+              onClick={toggleTimestampSort}
+              className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+
             >
-              <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
+              [SORT]
             </button>
-          </div>
-        </div>
-
-        <div className="flex flex-1 min-h-0">
-          <div
-            className={`flex flex-shrink-0 transition-all ${sidebarCollapsed ? 'w-0' : ''}`}
-            style={{ width: sidebarCollapsed ? '0px' : `${sidebarWidth}px` }}
-          >
-            <div className={`bg-zinc-950 border-r border-zinc-800 flex flex-col flex-1 ${sidebarCollapsed ? 'overflow-hidden' : ''}`}>
-              <div className="p-4 border-b border-zinc-800">
-                <h1 className="text-xl font-bold text-zinc-50 whitespace-nowrap">Drashta</h1>
-              </div>
-
-              <div className="p-4 border-b border-zinc-800">
-                <h2 className="text-xs font-bold text-zinc-500 uppercase tracking-wide mb-3 whitespace-nowrap">
-                  Event Source
-                </h2>
-                <EventSourceToggle
-                  selectedSource={selectedSource}
-                  onSourceChange={handleSourceChange}
-                  drainCount={drainLogs.length}
-                  liveCount={liveLogs.length}
-                />
-              </div>
-
-              <div className="flex-1 p-4 space-y-4 overflow-y-auto shadcn-scrollbar">
-                <div>
-                  <h2 className="text-xs font-bold text-zinc-500 uppercase tracking-wide mb-3 whitespace-nowrap">
-                    Services
-                  </h2>
-                  <div className="space-y-1">
-                    {SERVICES.map((svc) => (
-                      <button
-                        key={svc}
-                        className={`w-full text-left px-3 py-2 rounded-md text-sm whitespace-nowrap font-medium transition-colors border ${selectedService === svc
-                          ? "bg-zinc-50 text-zinc-900 border-zinc-700"
-                          : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100 border-transparent"
-                          }`}
-                        onClick={() => setSelectedService(svc)}
-                      >
-                        {svc}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
+            <div className={`flex border ${config.border} rounded overflow-hidden`}>
+              <button
+                onClick={() => handleSourceChange("drain")}
+                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono ${selectedSource === "drain" ? "font-bold" : "font-normal"
+                  }`}
+              >
+                DRAIN
+              </button>
+              <button
+                onClick={() => handleSourceChange("live")}
+                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono ${selectedSource === "live" ? "font-bold" : "font-normal"
+                  }`}
+              >
+                LIVE
+              </button>
             </div>
 
-            {!sidebarCollapsed && (
-              <div
-                className="w-1 bg-zinc-800 cursor-col-resize flex-shrink-0 hover:bg-zinc-600 transition-colors"
-                onMouseDown={handleSidebarMouseDown}
-              />
-            )}
-          </div>
 
-          <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-            <div className="bg-zinc-950 border-b border-zinc-800 px-6 py-3 flex-shrink-0">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-4">
+            <button
+              onClick={handleRefresh}
+              className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+            >
+              [REFRESH]
+            </button>
+
+            <button
+              onClick={() => setShowAnalytics(!showAnalytics)}
+              className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+
+            >
+              [CHART]
+            </button>
+
+            <div className="relative">
+              <button
+                onClick={() => setThemeDropdownOpen(!themeDropdownOpen)}
+                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+
+              >
+                [THEME]
+              </button>
+              {themeDropdownOpen && (
+                <div className={`absolute top-full right-0 mt-1 ${config.bg} border ${config.border} rounded shadow-2xl z-20 overflow-hidden`}>
                   <button
-                    onClick={toggleSidebar}
-                    className="p-2 rounded-md hover:bg-zinc-900 transition-colors"
-                    aria-label="Toggle sidebar"
+                    onClick={() => {
+                      setTheme("emerald");
+                      setThemeDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-3 py-1 text-xs hover:opacity-80 transition-colors border-b ${config.border} font-mono ${theme === "emerald" ? "bg-green-600 text-black" : config.text}`}
                   >
-                    <div className="w-5 h-4 flex flex-col justify-between">
-                      <span className="block h-0.5 bg-zinc-400"></span>
-                      <span className="block h-0.5 bg-zinc-400"></span>
-                      <span className="block h-0.5 bg-zinc-400"></span>
-                    </div>
-                  </button>
-
-                  <div className="text-sm px-3 py-1.5 bg-zinc-900 rounded-md border border-zinc-800">
-                    <span className="text-zinc-400">Total: </span>
-                    <span className="text-zinc-50 font-semibold">{filteredAndSortedLogs.length.toLocaleString()}</span>
-                  </div>
-                  <div className="text-sm px-3 py-1.5 bg-red-500/10 rounded-md border border-red-500/20">
-                    <span className="text-red-400">Errors: </span>
-                    <span className="text-red-300 font-semibold">
-                      {filteredAndSortedLogs.filter((l) => l.event_type.toLowerCase() === "error").length.toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="text-sm px-3 py-1.5 bg-orange-500/10 rounded-md border border-orange-500/20">
-                    <span className="text-orange-400">Failures: </span>
-                    <span className="text-orange-300 font-semibold">
-                      {filteredAndSortedLogs.filter((l) => l.event_type.toLowerCase() === "failure").length.toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="text-sm px-3 py-1.5 bg-yellow-500/10 rounded-md border border-yellow-500/20">
-                    <span className="text-yellow-400">Warnings: </span>
-                    <span className="text-yellow-300 font-semibold">
-                      {filteredAndSortedLogs.filter((l) => l.event_type.toLowerCase() === "warn").length.toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="text-sm px-3 py-1.5 bg-blue-500/10 rounded-md border border-blue-500/20">
-                    <span className="text-blue-400">Info: </span>
-                    <span className="text-blue-300 font-semibold">
-                      {filteredAndSortedLogs.filter((l) => l.event_type.toLowerCase() === "info").length.toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={toggleTimestampSort}
-                    className="px-3 py-1.5 text-sm rounded-md border font-medium transition-colors bg-zinc-900 text-zinc-300 border-zinc-800 hover:bg-zinc-800 flex items-center gap-2"
-                    title={`Sort: ${sortDirection === 'desc' ? 'Newest first' : 'Oldest first'}`}
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    <span className="flex items-center gap-1">
-                      Time
-                      {sortDirection === 'desc' ? (
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      ) : (
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-                        </svg>
-                      )}
-                    </span>
-                  </button>
-
-                  <div className="relative">
-                    <button
-                      onClick={() => setEventTypeDropdownOpen(!typeDropdownOpen)}
-                      className="px-3 py-1.5 text-sm rounded-md border font-medium transition-colors bg-zinc-900 text-zinc-300 border-zinc-800 hover:bg-zinc-800 flex items-center gap-2"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-                      </svg>
-                      <span>Event Type</span>
-                      {selectedType.length > 0 && (
-                        <span className="bg-zinc-700 text-zinc-200 px-1.5 py-0.5 rounded text-xs font-semibold">
-                          {selectedType.length}
-                        </span>
-                      )}
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </button>
-                    <EventTypeDropdown
-                      selectedTypes={selectedType}
-                      onTypeToggle={toggleTypeSelection}
-                      isOpen={typeDropdownOpen}
-                      onToggle={() => setEventTypeDropdownOpen(false)}
-                      availableTypes={availableTypes}
-                    />
-                  </div>
-
-                  <button
-                    onClick={() => setShowAnalytics(!showAnalytics)}
-                    className={`px-3 py-1.5 text-sm rounded-md border font-medium transition-colors ${showAnalytics
-                      ? 'bg-zinc-50 text-zinc-900 border-zinc-700'
-                      : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:bg-zinc-800'
-                      }`}
-                  >
-                    {showAnalytics ? 'Hide' : 'Show'} Analytics
+                    HECKER
                   </button>
                   <button
-                    onClick={clearCurrentLogs}
-                    className="px-3 py-1.5 text-sm bg-zinc-900 text-zinc-300 rounded-md border border-zinc-800 hover:bg-zinc-800 transition-colors font-medium"
+                    onClick={() => {
+                      setTheme("white");
+                      setThemeDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-3 py-1 text-xs hover:opacity-80 transition-colors border-b ${config.border} font-mono ${theme === "white" ? "bg-gray-900 text-white" : config.text}`}
                   >
-                    Clear Logs
+                    WHITE
                   </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex-1 flex flex-col overflow-hidden m-4 gap-4" style={{ height: 'calc(100vh - 250px)' }}>
-              {showAnalytics && (
-                <div className="flex-shrink-0" style={{ height: '30%', minHeight: '280px' }}>
-                  <LogCountChart logs={filteredAndSortedLogs} timeRange={selectedTimeRange} />
+                  <button
+                    onClick={() => {
+                      setTheme("black");
+                      setThemeDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-3 py-1 text-xs hover:opacity-80 transition-colors font-mono ${theme === "black" ? "bg-gray-300 text-black" : config.text}`}
+                  >
+                    BLACK
+                  </button>
                 </div>
               )}
-
-              <div className="flex-1 bg-zinc-950 rounded-lg overflow-hidden flex flex-col border border-zinc-800">
-                <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    {selectedSource === "drain" && <PaginationBar />}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="text-xs text-zinc-500 font-medium">
-                      Showing {filteredAndSortedLogs.length} of {currentLogs.length} logs
-                    </div>
-                    <div className="text-xs text-zinc-600 font-medium">
-                      {sortDirection === 'desc' ? '↓ Newest first' : '↑ Oldest first'}
-                    </div>
-                  </div>
-                </div>
-
-                <div ref={parentRef} className="flex-1 overflow-auto shadcn-scrollbar bg-zinc-950">
-                  {filteredAndSortedLogs.length === 0 ? (
-                    <div className="flex items-center justify-center h-full text-zinc-500">
-                      <div className="text-center p-8 border border-zinc-800 rounded-lg bg-zinc-900">
-                        <div className="text-lg font-semibold text-zinc-300">No logs found</div>
-                        <div className="text-sm text-zinc-500 mt-2">
-                          {selectedService !== "All" && availableTypes.length === 1
-                            ? `No event types available for ${selectedService}`
-                            : "Try adjusting filters or wait for new events"
-                          }
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div
-                      style={{
-                        height: `${rowVirtualizer.getTotalSize()}px`,
-                        position: "relative",
-                      }}
-                    >
-                      {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                        const log = filteredAndSortedLogs[virtualRow.index];
-                        const isExpanded = expandedLogs.has(virtualRow.index);
-
-                        return (
-                          <div
-                            key={virtualRow.key}
-                            data-index={virtualRow.index}
-                            ref={rowVirtualizer.measureElement}
-                            className="absolute left-0 right-0"
-                            style={{
-                              transform: `translateY(${virtualRow.start}px)`,
-                            }}
-                          >
-                            <LogCardThingy
-                              log={log}
-                              isExpanded={isExpanded}
-                              onToggle={() => toggleLogExpansion(virtualRow.index)}
-                              onViewJson={openJsonPart}
-                            />
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </div>
             </div>
           </div>
         </div>
-
-        <JsonPart
-          isOpen={jsonModal.isOpen}
-          onClose={closeJsonPart}
-          rawMsg={jsonModal.rawMsg}
-        />
       </div>
-    </>
+
+      {showAnalytics && (
+        <div className={`h-100 border-b ${config.border} p-4 bg-opacity-50 overflow-auto`}>
+          <LogCountChart logs={filteredAndSortedLogs} timeRange={selectedTimeRange} theme={theme} />
+        </div>
+      )}
+
+      <div className={`flex-1 flex flex-col overflow-hidden ${config.bg} relative`}>
+        <div ref={parentRef} className={`flex-1 overflow-y-auto ${config.bg}`}>
+          {filteredAndSortedLogs.length === 0 ? (
+            <div className="flex items-center justify-center h-full">
+              <div className={`${config.accent} text-xs space-y-1 font-mono`}>
+                <div>$ no_logs_found --search</div>
+                <div className="opacity-50">✗ No results matching your query</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
+              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                const log = filteredAndSortedLogs[virtualRow.index];
+                const isExpanded = expandedLogs.has(virtualRow.index);
+
+                return (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={rowVirtualizer.measureElement}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      transform: `translateY(${virtualRow.start}px)`,
+                      willChange: 'transform',
+                      contain: 'layout style paint',
+                    }}
+                  >
+                    <TableLogRow
+                      log={log}
+                      isExpanded={isExpanded}
+                      onToggle={() => toggleLogExpansion(virtualRow.index)}
+                      onViewJson={openJsonPart}
+                      theme={theme}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {selectedSource === "drain" && filteredAndSortedLogs.length > 0 && (
+          <div className="absolute bottom-2 right-4 flex items-center gap-2 text-xs font-mono">
+            <button
+              onMouseEnter={() => prefetchPreviousPage()}
+              onClick={handlePrevPage}
+              disabled={currentPage === 0}
+              className={`px-2 py-0.5 border ${config.border} rounded hover:opacity-80 disabled:opacity-30 transition-colors ${config.text}`}
+            >
+              [PREV]
+            </button>
+            <span className={config.accent}>{currentPage + 1}</span>
+            <button
+              onMouseEnter={() => cursor && prefetchNextPage(cursor)}
+              onClick={handleNextPage}
+              disabled={!cursor}
+              className={`px-2 py-0.5 rounded hover:opacity-80 disabled:opacity-30 transition-colors font-bold ${config.activeBtn}`}
+            >
+              [NEXT]
+            </button>
+          </div>
+        )}
+      </div>
+      <JsonPart isOpen={jsonModal.isOpen} onClose={closeJsonPart} rawMsg={jsonModal.rawMsg} theme={theme} />
+
+    </div>
   );
 }
