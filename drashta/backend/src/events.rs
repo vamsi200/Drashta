@@ -2,37 +2,40 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use crate::parser::{
-    Cursor, CursorType, Entry, EventData, EventType, ParserFuncArgs, ProcessLogType,
-    deserialize_cursor, get_service_configs, handle_service_event, read_journal_logs,
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, VecDeque},
+    convert::Infallible,
+    io::{BufWriter, Write},
+    mem::size_of_val,
+    process::exit,
+    sync::{Arc, Mutex},
+    thread::{sleep, spawn},
+    time::Duration,
 };
+
 use anyhow::Result;
-use axum::extract::State;
 use axum::{
     Router,
+    extract::State,
     response::sse::{Event, KeepAlive, Sse},
     routing::get,
 };
 use axum_extra::extract::Query;
-use futures::StreamExt;
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use log::{Level, debug, error, info, log_enabled};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, to_string};
-use std::borrow::Cow;
-use std::collections::VecDeque;
-use std::convert::Infallible;
-use std::io::Write;
-use std::mem::size_of_val;
-use std::process::exit;
-use std::sync::{Arc, Mutex};
-use std::thread::{sleep, spawn};
-use std::time::Duration;
-use std::{collections::BTreeMap, io::BufWriter};
-use tokio::sync::broadcast::Sender;
-use tokio::sync::mpsc::{self, Receiver};
-use tokio::task::{spawn_blocking, yield_now};
+use tokio::{
+    sync::{
+        broadcast::{self, Sender},
+        mpsc::{self, Receiver},
+    },
+    task::{spawn_blocking, yield_now},
+};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+
+use crate::parser::*;
 
 pub struct Journalunits {
     journal_units: Vec<String>,
@@ -134,7 +137,7 @@ pub async fn drain_upto_n_entries(
     let journal_units_clone = journal_units.clone();
     let tx_clone = tx.clone();
     let filter_keyword = filter_event.0.query;
-    let handle = tokio::spawn(async move {
+    let handle = std::thread::spawn(move || {
         let ref_event_type: Option<Vec<&str>> = filter_event
             .0
             .event_type
@@ -164,7 +167,7 @@ pub async fn drain_upto_n_entries(
         last_cursor
     });
 
-    let cursor = handle.await.unwrap();
+    let cursor = handle.join().unwrap();
     let stream = async_stream::stream! {
         if let Some(cursor) = cursor {
             let cursor_json = json!({ "cursor": cursor }).to_string();
