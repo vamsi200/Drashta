@@ -3,7 +3,6 @@
 #![allow(unused_imports)]
 
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, VecDeque},
     convert::Infallible,
     io::{BufWriter, Write},

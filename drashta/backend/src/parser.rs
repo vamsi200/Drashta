@@ -96,6 +96,7 @@ pub enum Service {
     PkgManager,
     ConfigChange,
     NetworkManager,
+    Firewalld,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -149,6 +150,20 @@ pub enum EventType {
     AuditEvent,
     VirtualDeviceEvent,
     SystemdEvent,
+    ServiceStarted,
+    ServiceStopped,
+    ConfigReloaded,
+    ZoneChanged,
+    ServiceModified,
+    PortModified,
+    RuleApplied,
+    IptablesCommand,
+    InterfaceBinding,
+    CommandFailed,
+    OperationStatus,
+    ModuleMessage,
+    DBusMessage,
+    FirwallError,
 }
 
 type ParserFn = fn(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData>;
@@ -226,156 +241,7 @@ pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
     msg.get(i).map(|m| m.as_str().to_string())
 }
 
-pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
-    match ev {
-        // SSHD
-        "Success" => &["AUTH_SUCCESS"],
-        "Failure" => &["AUTH_FAILURE"],
-        "SessionOpened" => &["SESSION_OPENED"],
-        "SessionClosed" => &["SESSION_CLOSED"],
-        "ConnectionClosed" => &["CONNECTION_CLOSED"],
-        "TooManyAuthFailures" => &["TOO_MANY_AUTH"],
-        "Warning" => &["WARNING"],
-        "Info" => &["RECEIVED_DISCONNECT", "NEGOTIATION_FAILURE"],
-        "Other" => &["UNKNOWN"],
-        // SUDO
-        "IncorrectPassword" => &["INCORRECT_PASSWORD"],
-        "AuthError" => &["AUTH_ERROR"],
-        "AuthFailure" => &["AUTH_FAILURE"],
-        "CmdRun" => &["COMMAND_RUN"],
-        "SessionOpenedSudo" => &["SESSION_OPENED_SUDO", "SESSION_OPENED_SU"],
-        "SudoWarning" => &["SUDO_WARNING"],
-        "NotInSudoers" => &["NOT_IN_SUDOERS"],
-        // LOGIN
-        "LoginSuccess" => &["LOGIN_SUCCESS"],
-        "FailedLogin" => &["FAILED_LOGIN", "FAILED_LOGIN_TTY"],
-        "TooManyTries" => &["TOO_MANY_TRIES"],
-        "AuthCheckPass" => &["AUTH_CHECK_PASS"],
-        "AuthUserUnknown" => &["AUTH_USER_UNKNOWN"],
-        "FaillockUserUnknown" => &["FAILL0CK_USER_UNKNOWN"],
-        "NoLoginRefused" => &["NOLOGIN_REFUSED"],
-        "AccountExpired" => &["ACCOUNT_EXPIRED"],
-        "SessionOpenedLogin" => &["SESSION_OPENED"],
-        "SessionClosedLogin" => &["SESSION_CLOSED"],
-        // USER CREATION
-        "NewUser" => &["NEW_USER"],
-        "NewGroup" => &["NEW_GROUP"],
-        "GroupAddedEtcGroup" => &["GROUP_ADDED_ETC_GROUP"],
-        "GroupAddedEtcGshadow" => &["GROUP_ADDED_ETC_GSHADOW"],
-        // USER DELETION
-        "DeleteUser" => &["DELETE_USER"],
-        "DeleteUserHome" => &["DELETE_USER_HOME"],
-        "DeleteUserMail" => &["DELETE_USER_MAIL"],
-        "DeleteGroup" => &["DELETE_GROUP"],
-        // USER MODIFICATION
-        "ModifyUser" => &["MODIFY_USER"],
-        "ModifyGroup" => &["MODIFY_GROUP"],
-        "PasswdChange" => &["USER_PASSWD_CHANGE"],
-        "ShadowUpdated" => &["USER_SHADOW_UPDATED"],
-        // PKG EVENTS
-        "PkgInstalled" => &["INSTALLED"],
-        "PkgRemoved" => &["REMOVED"],
-        "PkgUpgraded" => &["UPGRADED"],
-        "PkgDowndraded" => &["DOWNGRADED"],
-        "PkgReinstalled" => &["REINSTALLED"],
-        // CRON
-        "CronCmd" => &["CRON_CMD"],
-        "CronReload" => &["CRON_RELOAD"],
-        "CronErrorBadCommand" => &["CRON_ERROR_BAD_COMMAND"],
-        "CronErrorBadMinute" => &["CRON_ERROR_BAD_MINUTE"],
-        "CronErrorOther" => &["CRON_ERROR_OTHER"],
-        "CronDenied" => &["CRON_DENIED"],
-        "CronSessionOpen" => &["CRON_SESSION_OPEN"],
-        "CronSessionClose" => &["CRON_SESSION_CLOSE"],
-        "NewConnection" => &["CONNECTION_CLOSED"],
-        // NETWORK MANAGER
-        "NetworkConnectionActivated" => &["CONNECTION_ACTIVATED"],
-        "NetworkConnectionDeactivated" => &["CONNECTION_DEACTIVATED"],
-        "NetworkDhcpLease" => &["DHCP_LEASE"],
-        "NetworkIpConfig" => &["IP_CONFIG"],
-        "NetworkDeviceAdded" => &["DEVICE_ADDED"],
-        "NetworkDeviceRemoved" => &["DEVICE_REMOVED"],
-        "NetworkWifiAssociationSuccess" => &["WIFI_ASSOC_SUCCESS"],
-        "NetworkWifiAuthFailure" => &["WIFI_AUTH_FAILURE"],
-        "NetworkStateChange" => &["STATE_CHANGE"],
-        "NetworkConnectionAttempt" => &["CONNECTION_ATTEMPT"],
-        "NetworkWarning" => &["WARNING"],
-        "NetworkUnknown" => &["UNKNOWN"],
-        _ => &[],
-    }
-}
-
 pub fn parse_sshd_logs(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
-    static PROTOCOL_MISMATCH: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
-        vec![
-            (
-                "INVALID_PROTOCOL_ID",
-                Regex::new(
-                    r"(?x)
-                ^kex_exchange_identification:\s*
-                (?:read:\s*)?
-                (Client\s+sent\s+invalid\s+protocol\s+identifier|
-                 Connection\s+(?:closed\s+by\s+remote\s+host|reset\s+by\s+peer))
-                \s*$
-            ",
-                )
-                .unwrap(),
-            ),
-            (
-                "BAD_PROTOCOL_VERSION",
-                Regex::new(
-                    r"(?x)
-                ^Bad\s+protocol\s+version\s+identification\s+
-                '(.+?)'
-                (?:\s+from\s+([0-9A-Fa-f:.]+))?
-                (?:\s+port\s+(\d+))?
-                \s*$
-            ",
-                )
-                .unwrap(),
-            ),
-            (
-                "MAJOR_VERSION_DIFF",
-                Regex::new(
-                    r"(?x)
-                ^Protocol\s+major\s+versions\s+differ\s+
-                for\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+):\s*
-                (\d+)\s*vs\.\s*(\d+)
-                \s*$
-            ",
-                )
-                .unwrap(),
-            ),
-            (
-                "BANNER_OR_DISPATCH_ERROR",
-                Regex::new(
-                    r"(?x)
-                ^(?:banner\s+exchange|ssh_dispatch_run_fatal):\s+
-                Connection\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+):\s*
-                (invalid\s+format|
-                 message\s+authentication\s+code\s+incorrect|
-                 Connection\s+corrupted)
-                (?:\s+\[preauth\])?
-                \s*$
-            ",
-                )
-                .unwrap(),
-            ),
-            (
-                "SOCKET_READ_FAILURE",
-                Regex::new(
-                    r"(?x)
-                ^Read\s+from\s+socket\s+failed:\s+
-                Connection\s+(?:reset|closed)\s+by\s+peer
-                \s*$
-            ",
-                )
-                .unwrap(),
-            ),
-            ("UNKNOWN", Regex::new(r"(?s)^(.*\S.*)$").unwrap()),
-        ]
-    });
-
     let msg = entry_map.get("MESSAGE")?;
     let timestamp = entry_map
         .get("SYSLOG_TIMESTAMP")
@@ -1075,8 +941,85 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
     None
 }
 
-pub fn parse_firewalld_events(map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
-    todo!()
+pub fn parse_firewalld_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
+    let msg = entry_map.get("MESSAGE")?;
+    let timestamp = entry_map
+        .get("SYSLOG_TIMESTAMP")
+        .cloned()
+        .unwrap_or_default();
+
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+
+        FIREWALLD_REGEX
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect()
+    } else {
+        FIREWALLD_REGEX.iter().collect()
+    };
+
+    let mut map = AHashMap::new();
+    let s = entry_map.get("MESSAGE")?;
+
+    for (name, regex) in filtered_regexes {
+        if let Some(caps) = regex.captures(s) {
+            let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                "SERVICE_STARTED" => (None, EventType::ServiceStarted),
+                "SERVICE_STOPPED" => (None, EventType::ServiceStopped),
+                "CONFIG_RELOADED" => (None, EventType::ConfigReloaded),
+                "ZONE_CHANGED" => (
+                    Some(&[("zone", 1), ("interface", 2)]),
+                    EventType::ZoneChanged,
+                ),
+                "SERVICE_MODIFIED" => (
+                    Some(&[("service", 1), ("zone", 2)]),
+                    EventType::ServiceModified,
+                ),
+                "PORT_MODIFIED" => (
+                    Some(&[("port", 1), ("protocol", 2), ("zone", 3)]),
+                    EventType::PortModified,
+                ),
+                "RULE_APPLIED" => (Some(&[("rule", 1)]), EventType::RuleApplied),
+                "IPTABLES_COMMAND" => (Some(&[("msg", 1)]), EventType::IptablesCommand),
+                "INTERFACE_BINDING" => (
+                    Some(&[("interface", 1), ("zone", 2)]),
+                    EventType::InterfaceBinding,
+                ),
+                "COMMAND_FAILED" => (Some(&[("msg", 1)]), EventType::CommandFailed),
+                "OPERATION_STATUS" => (Some(&[("msg", 1)]), EventType::OperationStatus),
+                "MODULE_MSG" => (
+                    Some(&[("module", 1), ("msg", 2), ("details", 3)]),
+                    EventType::ModuleMessage,
+                ),
+                "DBUS_MSG" => (Some(&[("msg", 1), ("details", 2)]), EventType::DBusMessage),
+                "WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
+                "ERROR" => (Some(&[("msg", 1)]), EventType::FirwallError),
+                "INFO" => (Some(&[("msg", 1)]), EventType::Info),
+                _ => (Some(&[("msg", 1)]), EventType::Other),
+            };
+
+            if let Some(fields) = data {
+                for &(fname, idx) in fields {
+                    if let Some(m) = caps.get(idx) {
+                        map.insert(fname.to_string(), m.as_str().to_string());
+                    }
+                }
+            }
+
+            return Some(EventData {
+                timestamp,
+                service: Service::Firewalld,
+                data: map,
+                event_type,
+                raw_msg: RawMsgType::Structured(entry_map),
+            });
+        }
+    }
+    None
 }
 
 pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
@@ -1111,10 +1054,10 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
     );
 
     map.insert(
-        "firewall.events",
+        "firewalld.events",
         ServiceConfig {
             matches: vec![("_SYSTEMD_UNIT", "firewalld.service")],
-            parser: |_d, _s| None, // TODO
+            parser: parse_firewalld_events,
         },
     );
 
@@ -1642,7 +1585,7 @@ pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> 
                     "sshd.events",
                     "sudo.events",
                     "login.events",
-                    "firewall.events",
+                    "firewalld.events",
                     "networkmanager.events",
                     "kernel.events",
                     "userchange.events",
@@ -1659,7 +1602,7 @@ pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> 
                     "sshd.events",
                     "sudo.events",
                     "login.events",
-                    "firewall.events",
+                    "firewalld.events",
                     "networkmanager.events",
                     "kernel.events",
                     "userchange.events",
@@ -1715,7 +1658,7 @@ pub fn read_journal_logs(
                     continue;
                 }
 
-                if let Err(_) = tx.send(ev.clone()) {
+                if tx.send(ev.clone()).is_err() {
                     info!("No active receiver, buffering event...");
                     if failed_ev_buf.len() >= MAX_FAILED_EVENTS {
                         warn!(

@@ -16,6 +16,76 @@ pub static SSHD_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         ]
 });
 
+pub static PROTOCOL_MISMATCH: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
+    vec![
+        (
+            "INVALID_PROTOCOL_ID",
+            Regex::new(
+                r"(?x)
+                ^kex_exchange_identification:\s*
+                (?:read:\s*)?
+                (Client\s+sent\s+invalid\s+protocol\s+identifier|
+                 Connection\s+(?:closed\s+by\s+remote\s+host|reset\s+by\s+peer))
+                \s*$
+            ",
+            )
+            .unwrap(),
+        ),
+        (
+            "BAD_PROTOCOL_VERSION",
+            Regex::new(
+                r"(?x)
+                ^Bad\s+protocol\s+version\s+identification\s+
+                '(.+?)'
+                (?:\s+from\s+([0-9A-Fa-f:.]+))?
+                (?:\s+port\s+(\d+))?
+                \s*$
+            ",
+            )
+            .unwrap(),
+        ),
+        (
+            "MAJOR_VERSION_DIFF",
+            Regex::new(
+                r"(?x)
+                ^Protocol\s+major\s+versions\s+differ\s+
+                for\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+):\s*
+                (\d+)\s*vs\.\s*(\d+)
+                \s*$
+            ",
+            )
+            .unwrap(),
+        ),
+        (
+            "BANNER_OR_DISPATCH_ERROR",
+            Regex::new(
+                r"(?x)
+                ^(?:banner\s+exchange|ssh_dispatch_run_fatal):\s+
+                Connection\s+from\s+([0-9A-Fa-f:.]+)\s+port\s+(\d+):\s*
+                (invalid\s+format|
+                 message\s+authentication\s+code\s+incorrect|
+                 Connection\s+corrupted)
+                (?:\s+\[preauth\])?
+                \s*$
+            ",
+            )
+            .unwrap(),
+        ),
+        (
+            "SOCKET_READ_FAILURE",
+            Regex::new(
+                r"(?x)
+                ^Read\s+from\s+socket\s+failed:\s+
+                Connection\s+(?:reset|closed)\s+by\s+peer
+                \s*$
+            ",
+            )
+            .unwrap(),
+        ),
+        ("UNKNOWN", Regex::new(r"(?s)^(.*\S.*)$").unwrap()),
+    ]
+});
+
 pub static SUDO_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
     vec![
             ("COMMAND_RUN", Regex::new(r"(?x)^(\w+)\s+:\s+TTY=(\S+)\s+;\s+PWD=(\S+)\s+;\s+USER=(\S+)\s+;\s+COMMAND=(/usr/bin/su.*)$").unwrap()),
@@ -393,3 +463,122 @@ pub static NETWORK_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         ),
     ]
 });
+
+pub static FIREWALLD_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
+    vec![
+            ("SERVICE_STARTED", Regex::new(r"(?x)^firewalld\s+(?:is\s+)?running\s*$").unwrap()),
+            ("SERVICE_STOPPED", Regex::new(r"(?x)^firewalld\s+(?:is\s+)?stopped\s*$").unwrap()),
+            ("CONFIG_RELOADED", Regex::new(r"(?x)^(?:firewalld|firewall):\s+(?:Configuration\s+)?reloaded|Reloading\s+firewall\s+rules").unwrap()),
+            ("ZONE_CHANGED", Regex::new(r"(?x)^(?:Zone|Zone\s+changes)?:\s+(\w+)\s+(?:activated|changed|modified|added|removed)(?:\s+on\s+([a-z0-9\.]+))?\s*$").unwrap()),
+            ("SERVICE_MODIFIED", Regex::new(r"(?x)^(?:Service|service)\s+(\S+)\s+(?:added|removed|enabled|disabled)(?:\s+in\s+zone\s+(\w+))?\s*$").unwrap()),
+            ("PORT_MODIFIED", Regex::new(r"(?x)^(?:Port|port)\s+(\d+)/(\w+)\s+(?:opened|closed|added|removed)(?:\s+in\s+zone\s+(\w+))?\s*$").unwrap()),
+            ("RULE_APPLIED", Regex::new(r"(?x)^(?:Rule|rule)\s+(?:added|removed|modified|applied)(?::\s+(.+))?\s*$").unwrap()),
+            ("IPTABLES_COMMAND", Regex::new(r"(?x)^(?:WARNING|ERROR):\s+'(?:/usr/sbin/(?:ip6?tables|nft)(?:-restore|-save)?)'\s+(?:failed|succeeded):(.*)$").unwrap()),
+            ("INTERFACE_BINDING", Regex::new(r"(?x)^(?:Interface|interface)\s+([a-z0-9\.:]+)\s+(?:added|removed|bound|unbound)(?:\s+(?:to|from)\s+zone\s+(\w+))?\s*$").unwrap()),
+            ("COMMAND_FAILED", Regex::new(r"(?x)^ERROR:\s+COMMAND_FAILED|ERROR:\s+(.+)").unwrap()),
+            ("OPERATION_STATUS", Regex::new(r"(?x)^(?:reload|restart|reload-and-restart)(?:ed)?\s+(?:completed|failed|successful)(?:\s+(.+))?\s*$").unwrap()),
+            ("MODULE_MSG", Regex::new(r"(?x)^(?:ModuleConnector|Connector)(?:\(([^)]+)\))?\s+(?:MSG:)?\s*(.+?)(?:\s+\[(.+?)\])?\s*$").unwrap()),
+            ("DBUS_MSG", Regex::new(r"(?x)^(?:DBus|dbus)\s+(?:error|warning|info)?:?\s*(.+?)(?:\s+\[(.+?)\])?\s*$").unwrap()),
+            ("WARNING", Regex::new(r"(?x)^WARNING:\s+(.+\S)\s*$").unwrap()),
+            ("ERROR", Regex::new(r"(?x)^ERROR:\s+(.+\S)\s*$").unwrap()),
+            ("INFO", Regex::new(r"(?x)^INFO:\s+(.+\S)\s*$").unwrap()),
+            ("UNKNOWN", Regex::new(r"(?s)^(.*\S.*)$").unwrap()),
+        ]
+});
+
+pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
+    match ev {
+        // SSHD
+        "Success" => &["AUTH_SUCCESS"],
+        "Failure" => &["AUTH_FAILURE"],
+        "SessionOpened" => &["SESSION_OPENED"],
+        "SessionClosed" => &["SESSION_CLOSED"],
+        "ConnectionClosed" => &["CONNECTION_CLOSED"],
+        "TooManyAuthFailures" => &["TOO_MANY_AUTH"],
+        "Warning" => &["WARNING"],
+        "Info" => &["RECEIVED_DISCONNECT", "NEGOTIATION_FAILURE"],
+        "Other" => &["UNKNOWN"],
+        // SUDO
+        "IncorrectPassword" => &["INCORRECT_PASSWORD"],
+        "AuthError" => &["AUTH_ERROR"],
+        "AuthFailure" => &["AUTH_FAILURE"],
+        "CmdRun" => &["COMMAND_RUN"],
+        "SessionOpenedSudo" => &["SESSION_OPENED_SUDO", "SESSION_OPENED_SU"],
+        "SudoWarning" => &["SUDO_WARNING"],
+        "NotInSudoers" => &["NOT_IN_SUDOERS"],
+        // LOGIN
+        "LoginSuccess" => &["LOGIN_SUCCESS"],
+        "FailedLogin" => &["FAILED_LOGIN", "FAILED_LOGIN_TTY"],
+        "TooManyTries" => &["TOO_MANY_TRIES"],
+        "AuthCheckPass" => &["AUTH_CHECK_PASS"],
+        "AuthUserUnknown" => &["AUTH_USER_UNKNOWN"],
+        "FaillockUserUnknown" => &["FAILL0CK_USER_UNKNOWN"],
+        "NoLoginRefused" => &["NOLOGIN_REFUSED"],
+        "AccountExpired" => &["ACCOUNT_EXPIRED"],
+        "SessionOpenedLogin" => &["SESSION_OPENED"],
+        "SessionClosedLogin" => &["SESSION_CLOSED"],
+        // USER CREATION
+        "NewUser" => &["NEW_USER"],
+        "NewGroup" => &["NEW_GROUP"],
+        "GroupAddedEtcGroup" => &["GROUP_ADDED_ETC_GROUP"],
+        "GroupAddedEtcGshadow" => &["GROUP_ADDED_ETC_GSHADOW"],
+        // USER DELETION
+        "DeleteUser" => &["DELETE_USER"],
+        "DeleteUserHome" => &["DELETE_USER_HOME"],
+        "DeleteUserMail" => &["DELETE_USER_MAIL"],
+        "DeleteGroup" => &["DELETE_GROUP"],
+        // USER MODIFICATION
+        "ModifyUser" => &["MODIFY_USER"],
+        "ModifyGroup" => &["MODIFY_GROUP"],
+        "PasswdChange" => &["USER_PASSWD_CHANGE"],
+        "ShadowUpdated" => &["USER_SHADOW_UPDATED"],
+        // PKG EVENTS
+        "PkgInstalled" => &["INSTALLED"],
+        "PkgRemoved" => &["REMOVED"],
+        "PkgUpgraded" => &["UPGRADED"],
+        "PkgDowndraded" => &["DOWNGRADED"],
+        "PkgReinstalled" => &["REINSTALLED"],
+        // CRON
+        "CronCmd" => &["CRON_CMD"],
+        "CronReload" => &["CRON_RELOAD"],
+        "CronErrorBadCommand" => &["CRON_ERROR_BAD_COMMAND"],
+        "CronErrorBadMinute" => &["CRON_ERROR_BAD_MINUTE"],
+        "CronErrorOther" => &["CRON_ERROR_OTHER"],
+        "CronDenied" => &["CRON_DENIED"],
+        "CronSessionOpen" => &["CRON_SESSION_OPEN"],
+        "CronSessionClose" => &["CRON_SESSION_CLOSE"],
+        "NewConnection" => &["CONNECTION_CLOSED"],
+        // NETWORK MANAGER
+        "NetworkConnectionActivated" => &["CONNECTION_ACTIVATED"],
+        "NetworkConnectionDeactivated" => &["CONNECTION_DEACTIVATED"],
+        "NetworkDhcpLease" => &["DHCP_LEASE"],
+        "NetworkIpConfig" => &["IP_CONFIG"],
+        "NetworkDeviceAdded" => &["DEVICE_ADDED"],
+        "NetworkDeviceRemoved" => &["DEVICE_REMOVED"],
+        "NetworkWifiAssociationSuccess" => &["WIFI_ASSOC_SUCCESS"],
+        "NetworkWifiAuthFailure" => &["WIFI_AUTH_FAILURE"],
+        "NetworkStateChange" => &["STATE_CHANGE"],
+        "NetworkConnectionAttempt" => &["CONNECTION_ATTEMPT"],
+        "NetworkWarning" => &["WARNING"],
+        "NetworkUnknown" => &["UNKNOWN"],
+        // FIREWALLD
+        "FirewalldServiceStarted" => &["SERVICE_STARTED"],
+        "FirewalldServiceStopped" => &["SERVICE_STOPPED"],
+        "FirewalldConfigReloaded" => &["CONFIG_RELOADED"],
+        "FirewalldZoneChanged" => &["ZONE_CHANGED"],
+        "FirewalldServiceModified" => &["SERVICE_MODIFIED"],
+        "FirewalldPortModified" => &["PORT_MODIFIED"],
+        "FirewalldRuleApplied" => &["RULE_APPLIED"],
+        "FirewalldIptablesCommand" => &["IPTABLES_COMMAND"],
+        "FirewalldInterfaceBinding" => &["INTERFACE_BINDING"],
+        "FirewalldCommandFailed" => &["COMMAND_FAILED"],
+        "FirewalldOperationStatus" => &["OPERATION_STATUS"],
+        "FirewalldModuleMessage" => &["MODULE_MSG"],
+        "FirewalldDBusMessage" => &["DBUS_MSG"],
+        "FirewalldWarning" => &["WARNING"],
+        "FirewalldError" => &["ERROR"],
+        "FirewalldInfo" => &["INFO"],
+        "FirewalldUnknown" => &["UNKNOWN"],
+        _ => &[],
+    }
+}
