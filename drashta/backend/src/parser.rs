@@ -97,22 +97,30 @@ pub enum Service {
     ConfigChange,
     NetworkManager,
     Firewalld,
+    Kernel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-pub enum EventType {
+pub enum AuthEvent {
     Success,
     Failure,
     SessionOpened,
     SessionClosed,
     ConnectionClosed,
     TooManyAuthFailures,
-    Warning,
-    Info,
-    Other,
     IncorrectPassword,
     AuthError,
     AuthFailure,
+    NotInSudoers,
+    AccountExpired,
+    NologinRefused,
+    Warning,
+    Info,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum UserEvent {
     NewUser,
     NewGroup,
     DeleteGroup,
@@ -120,13 +128,33 @@ pub enum EventType {
     ModifyUser,
     ModifyGroup,
     PasswdChange,
-    PkgInstalled,
-    PkgRemoved,
-    PkgUpgraded,
-    PkgReinstalled,
-    PkgDowndraded,
+    Info,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum PkgEvent {
+    Installed,
+    Removed,
+    Upgraded,
+    Reinstalled,
+    Downgraded,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum ConfigEvent {
     CmdRun,
     CronReload,
+    SessionOpened,
+    SessionClosed,
+    Failure,
+    Info,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum NetEvent {
     NewConnection,
     ConnectionActivated,
     ConnectionDeactivated,
@@ -150,6 +178,12 @@ pub enum EventType {
     AuditEvent,
     VirtualDeviceEvent,
     SystemdEvent,
+    Warning,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum FirewallEvent {
     ServiceStarted,
     ServiceStopped,
     ConfigReloaded,
@@ -163,7 +197,68 @@ pub enum EventType {
     OperationStatus,
     ModuleMessage,
     DBusMessage,
-    FirwallError,
+    Warning,
+    Error,
+    Info,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum KernelEvent {
+    Panic,
+    OomKill,
+    Segfault,
+    UsbError,
+    UsbDescriptorError,
+    UsbDeviceEvent,
+    DiskError,
+    FsMount,
+    FsError,
+    CpuError,
+    MemoryError,
+    DeviceDetected,
+    DriverEvent,
+    NetInterface,
+    PciDevice,
+    AcpiEvent,
+    ThermalEvent,
+    DmaError,
+    AuditEvent,
+    KernelTaint,
+    FirmwareLoad,
+    IrqEvent,
+    TaskKilled,
+    RcuStall,
+    Watchdog,
+    BootEvent,
+    Emergency,
+    Alert,
+    Critical,
+    Error,
+    Warning,
+    Notice,
+    Info,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum SystemEvent {
+    Info,
+    Warning,
+    Error,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum EventType {
+    Auth(AuthEvent),
+    User(UserEvent),
+    Package(PkgEvent),
+    Network(NetEvent),
+    Firewall(FirewallEvent),
+    Kernel(KernelEvent),
+    Config(ConfigEvent),
+    System(SystemEvent),
 }
 
 type ParserFn = fn(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData>;
@@ -271,21 +366,30 @@ pub fn parse_sshd_logs(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<E
             let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                 "AUTH_SUCCESS" => (
                     Some(&[("user", 2), ("ip", 3), ("port", 4), ("method", 1)]),
-                    EventType::Success,
+                    EventType::Auth(AuthEvent::Success),
                 ),
                 "AUTH_FAILURE" => (
                     Some(&[("method", 1), ("user", 2), ("ip", 3), ("port", 4)]),
-                    EventType::Failure,
+                    EventType::Auth(AuthEvent::Failure),
                 ),
-                "SESSION_OPENED" => (Some(&[("user", 1)]), EventType::SessionOpened),
-                "SESSION_CLOSED" => (Some(&[("user", 1)]), EventType::SessionClosed),
+                "SESSION_OPENED" => (
+                    Some(&[("user", 1)]),
+                    EventType::Auth(AuthEvent::SessionOpened),
+                ),
+                "SESSION_CLOSED" => (
+                    Some(&[("user", 1)]),
+                    EventType::Auth(AuthEvent::SessionClosed),
+                ),
                 "CONNECTION_CLOSED" => (
                     Some(&[("user", 1), ("ip", 2), ("port", 3)]),
-                    EventType::ConnectionClosed,
+                    EventType::Auth(AuthEvent::ConnectionClosed),
                 ),
-                "WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
-                "TOO_MANY_AUTH" => (Some(&[("user", 1)]), EventType::TooManyAuthFailures),
-                _ => (Some(&[("msg", 1)]), EventType::Other),
+                "WARNING" => (Some(&[("msg", 1)]), EventType::Auth(AuthEvent::Warning)),
+                "TOO_MANY_AUTH" => (
+                    Some(&[("user", 1)]),
+                    EventType::Auth(AuthEvent::TooManyAuthFailures),
+                ),
+                _ => (Some(&[("msg", 1)]), EventType::Auth(AuthEvent::Other)),
             };
 
             if let Some(fields) = data {
@@ -345,9 +449,9 @@ pub fn parse_sudo_login_attempts(
                             ("target_user", 4),
                             ("command", 5),
                         ]),
-                        EventType::Info,
+                        EventType::Auth(AuthEvent::Info),
                     ),
-                    _ => (None, EventType::Other),
+                    _ => (None, EventType::Auth(AuthEvent::Other)),
                 };
                 if let Some(fields) = data {
                     for &(name, idx) in fields {
@@ -366,7 +470,7 @@ pub fn parse_sudo_login_attempts(
                             ("invoking_user", 3),
                             ("invoking_uid", 4),
                         ]),
-                        EventType::SessionOpened,
+                        EventType::Auth(AuthEvent::SessionOpened),
                     ),
 
                     "SESSION_OPENED_SUDO" => (
@@ -376,10 +480,13 @@ pub fn parse_sudo_login_attempts(
                             ("invoking_user", 3),
                             ("invoking_uid", 4),
                         ]),
-                        EventType::SessionOpened,
+                        EventType::Auth(AuthEvent::SessionOpened),
                     ),
 
-                    "SESSION_CLOSED" => (Some(&[("target_user", 1)]), EventType::SessionClosed),
+                    "SESSION_CLOSED" => (
+                        Some(&[("target_user", 1)]),
+                        EventType::Auth(AuthEvent::SessionClosed),
+                    ),
 
                     "AUTH_FAILURE" => (
                         Some(&[
@@ -391,7 +498,7 @@ pub fn parse_sudo_login_attempts(
                             ("rhost", 6),
                             ("target_user", 7),
                         ]),
-                        EventType::Failure,
+                        EventType::Auth(AuthEvent::Failure),
                     ),
                     "INCORRECT_PASSWORD" => (
                         Some(&[
@@ -402,16 +509,19 @@ pub fn parse_sudo_login_attempts(
                             ("target_user", 5),
                             ("command", 6),
                         ]),
-                        EventType::IncorrectPassword,
+                        EventType::Auth(AuthEvent::IncorrectPassword),
                     ),
 
-                    "NOT_IN_SUDOERS" => (Some(&[("user", 1)]), EventType::Info),
+                    "NOT_IN_SUDOERS" => (
+                        Some(&[("user", 1)]),
+                        EventType::Auth(AuthEvent::NotInSudoers),
+                    ),
 
-                    "AUTH_ERROR" => (Some(&[("msg", 1)]), EventType::AuthError),
+                    "AUTH_ERROR" => (Some(&[("msg", 1)]), EventType::Auth(AuthEvent::AuthError)),
 
-                    "SUDO_WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
+                    "SUDO_WARNING" => (Some(&[("msg", 1)]), EventType::Auth(AuthEvent::Warning)),
 
-                    _ => (None, EventType::Other),
+                    _ => (None, EventType::Auth(AuthEvent::Other)),
                 };
 
                 if let Some(fields) = data {
@@ -476,37 +586,43 @@ pub fn parse_login_attempts(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
                             ("ruser", 5),
                             ("rhost", 6),
                         ]),
-                        EventType::AuthFailure,
+                        EventType::Auth(AuthEvent::Failure),
                     ),
 
                     "AUTH_CHECK_PASS" | "AUTH_USER_UNKNOWN" | "FAILL0CK_USER_UNKNOWN" => {
-                        (None, EventType::Info)
+                        (None, EventType::Auth(AuthEvent::Info))
                     }
 
                     "NOLOGIN_REFUSED" | "ACCOUNT_EXPIRED" => {
-                        (Some(&[("user", 1)]), EventType::Info)
+                        (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Info))
                     }
 
                     "SESSION_OPENED" => (
                         Some(&[("user", 1), ("uid", 2), ("LoginId", 3)]),
-                        EventType::SessionOpened,
+                        EventType::Auth(AuthEvent::SessionOpened),
                     ),
 
-                    "SESSION_CLOSED" => (Some(&[("user", 1)]), EventType::SessionClosed),
+                    "SESSION_CLOSED" => (
+                        Some(&[("user", 1)]),
+                        EventType::Auth(AuthEvent::SessionClosed),
+                    ),
 
-                    "LOGIN_SUCCESS" => (Some(&[("tty", 1), ("user", 2)]), EventType::Success),
+                    "LOGIN_SUCCESS" => (
+                        Some(&[("tty", 1), ("user", 2)]),
+                        EventType::Auth(AuthEvent::Success),
+                    ),
 
                     "FAILED_LOGIN" | "FAILED_LOGIN_TTY" => (
                         Some(&[("tries", 2), ("tty", 1), ("user", 3)]),
-                        EventType::Failure,
+                        EventType::Auth(AuthEvent::Failure),
                     ),
 
                     "TOO_MANY_TRIES" => (
                         Some(&[("tries", 1), ("tty", 2), ("user", 3)]),
-                        EventType::TooManyAuthFailures,
+                        EventType::Auth(AuthEvent::TooManyAuthFailures),
                     ),
 
-                    _ => (None, EventType::Other),
+                    _ => (None, EventType::Auth(AuthEvent::Other)),
                 };
 
                 if let Some(fields) = data {
@@ -529,8 +645,186 @@ pub fn parse_login_attempts(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
     None
 }
 
-pub fn parse_kernel_events(map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
-    todo!()
+pub fn parse_kernel_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
+    let msg = entry_map.get("MESSAGE")?;
+    let journal_timestamp = entry_map
+        .get("_SOURCE_BOOTTIME_TIMESTAMP")
+        .cloned()
+        .unwrap_or_default();
+    let timestamp = format_syslog_timestamp(&journal_timestamp);
+
+    let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
+        let names: Vec<&str> = ev_types
+            .iter()
+            .flat_map(|&s| str_to_regex_names(s).to_owned())
+            .collect();
+
+        KERNEL_REGEX
+            .iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect()
+    } else {
+        KERNEL_REGEX.iter().collect()
+    };
+
+    let mut map = AHashMap::new();
+    let s = entry_map.get("MESSAGE")?;
+
+    for (name, regex) in filtered_regexes {
+        if let Some(caps) = regex.captures(s) {
+            let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                "KERNEL_PANIC" => (
+                    Some(&[("msg", 1), ("cpu", 2)]),
+                    EventType::Kernel(KernelEvent::Panic),
+                ),
+                "OOM_KILL" => (
+                    Some(&[("pid", 1), ("process", 2), ("score", 3)]),
+                    EventType::Kernel(KernelEvent::OomKill),
+                ),
+                "SEGFAULT" => (
+                    Some(&[
+                        ("process", 1),
+                        ("pid", 2),
+                        ("address", 3),
+                        ("ip", 4),
+                        ("sp", 5),
+                        ("error", 6),
+                        ("binary", 7),
+                    ]),
+                    EventType::Kernel(KernelEvent::Segfault),
+                ),
+                "USB_ERROR" => (
+                    Some(&[("device", 1), ("msg", 2), ("error_code", 3)]),
+                    EventType::Kernel(KernelEvent::UsbError),
+                ),
+                "USB_DESCRIPTOR_ERROR" => (
+                    Some(&[("device", 1), ("msg", 2), ("error_code", 3)]),
+                    EventType::Kernel(KernelEvent::UsbDescriptorError),
+                ),
+                "USB_DEVICE_EVENT" => (
+                    Some(&[
+                        ("device", 1),
+                        ("event", 2),
+                        ("details", 3),
+                        ("vendor_id", 4),
+                        ("product_id", 5),
+                    ]),
+                    EventType::Kernel(KernelEvent::UsbDeviceEvent),
+                ),
+                "DISK_ERROR" => (
+                    Some(&[("device", 1), ("sector", 2), ("operation", 3)]),
+                    EventType::Kernel(KernelEvent::DiskError),
+                ),
+                "FS_MOUNT" => (
+                    Some(&[("device", 1), ("action", 2), ("details", 3)]),
+                    EventType::Kernel(KernelEvent::FsMount),
+                ),
+                "FS_ERROR" => (
+                    Some(&[("device", 1), ("msg", 2)]),
+                    EventType::Kernel(KernelEvent::FsError),
+                ),
+                "CPU_ERROR" => (
+                    Some(&[("cpu", 1), ("msg", 2)]),
+                    EventType::Kernel(KernelEvent::CpuError),
+                ),
+                "MEMORY_ERROR" => (
+                    Some(&[("msg", 1), ("address", 2)]),
+                    EventType::Kernel(KernelEvent::MemoryError),
+                ),
+                "DEVICE_DETECTED" => (
+                    Some(&[("device", 1), ("location", 2)]),
+                    EventType::Kernel(KernelEvent::DeviceDetected),
+                ),
+                "DRIVER_EVENT" => (
+                    Some(&[("driver", 1), ("details", 2)]),
+                    EventType::Kernel(KernelEvent::DriverEvent),
+                ),
+                "NET_INTERFACE" => (
+                    Some(&[("interface", 1), ("old_name", 2), ("speed", 3)]),
+                    EventType::Kernel(KernelEvent::NetInterface),
+                ),
+                "PCI_DEVICE" => (
+                    Some(&[("device", 1), ("msg", 2)]),
+                    EventType::Kernel(KernelEvent::PciDevice),
+                ),
+                "ACPI_EVENT" => (
+                    Some(&[("msg", 1), ("details", 2)]),
+                    EventType::Kernel(KernelEvent::AcpiEvent),
+                ),
+                "THERMAL_EVENT" => (
+                    Some(&[("zone", 1), ("msg", 2), ("temperature", 3)]),
+                    EventType::Kernel(KernelEvent::ThermalEvent),
+                ),
+                "DMA_ERROR" => (
+                    Some(&[("msg", 1), ("device", 2)]),
+                    EventType::Kernel(KernelEvent::DmaError),
+                ),
+                "AUDIT_EVENT" => (
+                    Some(&[("type", 1), ("msg", 2)]),
+                    EventType::Kernel(KernelEvent::AuditEvent),
+                ),
+                "KERNEL_TAINT" => (
+                    Some(&[("module", 1), ("reason", 2)]),
+                    EventType::Kernel(KernelEvent::KernelTaint),
+                ),
+                "FIRMWARE_LOAD" => (
+                    Some(&[("firmware", 1), ("device", 2)]),
+                    EventType::Kernel(KernelEvent::FirmwareLoad),
+                ),
+                "IRQ_EVENT" => (
+                    Some(&[("irq", 1), ("msg", 2)]),
+                    EventType::Kernel(KernelEvent::IrqEvent),
+                ),
+                "TASK_KILLED" => (
+                    Some(&[("pid", 1), ("process", 2), ("reason", 3)]),
+                    EventType::Kernel(KernelEvent::TaskKilled),
+                ),
+                "RCU_STALL" => (
+                    Some(&[("cpus", 1)]),
+                    EventType::Kernel(KernelEvent::RcuStall),
+                ),
+                "WATCHDOG" => (
+                    Some(&[("msg", 1), ("cpu", 2)]),
+                    EventType::Kernel(KernelEvent::Watchdog),
+                ),
+                "BOOT_EVENT" => (
+                    Some(&[("version", 1), ("details", 2)]),
+                    EventType::Kernel(KernelEvent::BootEvent),
+                ),
+                "EMERG" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Kernel(KernelEvent::Emergency),
+                ),
+                "ALERT" => (Some(&[("msg", 1)]), EventType::Kernel(KernelEvent::Alert)),
+                "CRITICAL" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Kernel(KernelEvent::Critical),
+                ),
+                "ERROR" => (Some(&[("msg", 1)]), EventType::Kernel(KernelEvent::Error)),
+                "WARNING" => (Some(&[("msg", 1)]), EventType::Kernel(KernelEvent::Warning)),
+                "NOTICE" => (Some(&[("msg", 1)]), EventType::Kernel(KernelEvent::Notice)),
+                "INFO" => (Some(&[("msg", 1)]), EventType::Kernel(KernelEvent::Info)),
+                _ => (Some(&[("msg", 1)]), EventType::Kernel(KernelEvent::Other)),
+            };
+
+            if let Some(fields) = data {
+                for &(fname, idx) in fields {
+                    if let Some(m) = caps.get(idx) {
+                        map.insert(fname.to_string(), m.as_str().to_string());
+                    }
+                }
+            }
+
+            return Some(EventData {
+                timestamp,
+                service: Service::Kernel,
+                data: map,
+                event_type,
+                raw_msg: RawMsgType::Structured(entry_map),
+            });
+        }
+    }
+    None
 }
 
 pub fn parse_user_change_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
@@ -575,13 +869,22 @@ pub fn parse_user_change_events(entry_map: Entry, ev_type: Option<Vec<&str>>) ->
                             ("shell", 5),
                             ("pts", 6),
                         ]),
-                        EventType::NewUser,
+                        EventType::User(UserEvent::NewUser),
                     ),
-                    "NEW_GROUP" => (Some(&[("name", 1), ("gid", 2)]), EventType::NewGroup),
-                    "GROUP_ADDED_ETC_GROUP" => (Some(&[("name", 1), ("gid", 2)]), EventType::Info),
-                    "GROUP_ADDED_ETC_GSHADOW" => (Some(&[("name", 1)]), EventType::Info),
-                    _ => (None, EventType::Other),
+                    "NEW_GROUP" => (
+                        Some(&[("name", 1), ("gid", 2)]),
+                        EventType::User(UserEvent::NewGroup),
+                    ),
+                    "GROUP_ADDED_ETC_GROUP" => (
+                        Some(&[("name", 1), ("gid", 2)]),
+                        EventType::User(UserEvent::Info),
+                    ),
+                    "GROUP_ADDED_ETC_GSHADOW" => {
+                        (Some(&[("name", 1)]), EventType::User(UserEvent::Info))
+                    }
+                    _ => (None, EventType::User(UserEvent::Other)),
                 };
+
                 if let Some(fields) = data {
                     for &(name, idx) in fields {
                         if let Some(m) = s.get(idx) {
@@ -589,6 +892,7 @@ pub fn parse_user_change_events(entry_map: Entry, ev_type: Option<Vec<&str>>) ->
                         }
                     }
                 }
+
                 return Some(EventData {
                     timestamp,
                     service: Service::UserChange,
@@ -597,69 +901,85 @@ pub fn parse_user_change_events(entry_map: Entry, ev_type: Option<Vec<&str>>) ->
                     raw_msg: RawMsgType::Structured(entry_map),
                 });
             }
-            for (name, regex) in filtered_regexes.iter() {
-                if let Some(s) = regex.captures(msg) {
-                    let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
-                        "DELETE_USER" => (
-                            Some(&[
-                                ("name", 1),
-                                ("uid", 2),
-                                ("gid", 3),
-                                ("home", 4),
-                                ("shell", 5),
-                            ]),
-                            EventType::DeleteUser,
-                        ),
-                        "DELETE_USER_HOME" => (Some(&[("name", 1)]), EventType::DeleteGroup),
-                        "DELETE_USER_MAIL" => (Some(&[("name", 1)]), EventType::Info),
-                        "DELETE_GROUP" => {
-                            (Some(&[("name", 1), ("gid", 2)]), EventType::DeleteGroup)
-                        }
-                        _ => (None, EventType::Other),
-                    };
-                    if let Some(fields) = data {
-                        for &(name, idx) in fields {
-                            if let Some(m) = s.get(idx) {
-                                map.insert(name.to_string(), m.as_str().to_string());
-                            }
-                        }
-                    }
-                    return Some(EventData {
-                        timestamp,
-                        service: Service::UserChange,
-                        event_type,
-                        data: map,
-                        raw_msg: RawMsgType::Structured(entry_map),
-                    });
-                }
-            }
+        }
 
-            for (name, regex) in filtered_regexes.iter() {
-                if let Some(s) = regex.captures(msg) {
-                    let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
-                        "MODIFY_USER" => (Some(&[("name", 1)]), EventType::ModifyUser),
-                        "MODIFY_GROUP" => (Some(&[("name", 1)]), EventType::DeleteGroup),
-                        "USER_PASSWD_CHANGE" => {
-                            (Some(&[("processid", 1), ("user", 2)]), EventType::Info)
-                        }
-                        "USER_SHADOW_UPDATED" => (Some(&[("name", 1)]), EventType::DeleteGroup),
-                        _ => (None, EventType::Other),
-                    };
-                    if let Some(fields) = data {
-                        for &(name, idx) in fields {
-                            if let Some(m) = s.get(idx) {
-                                map.insert(name.to_string(), m.as_str().to_string());
-                            }
+        for (name, regex) in filtered_regexes.iter() {
+            if let Some(s) = regex.captures(msg) {
+                let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                    "DELETE_USER" => (
+                        Some(&[
+                            ("name", 1),
+                            ("uid", 2),
+                            ("gid", 3),
+                            ("home", 4),
+                            ("shell", 5),
+                        ]),
+                        EventType::User(UserEvent::DeleteUser),
+                    ),
+                    "DELETE_USER_HOME" => (
+                        Some(&[("name", 1)]),
+                        EventType::User(UserEvent::DeleteGroup),
+                    ),
+                    "DELETE_USER_MAIL" => (Some(&[("name", 1)]), EventType::User(UserEvent::Info)),
+                    "DELETE_GROUP" => (
+                        Some(&[("name", 1), ("gid", 2)]),
+                        EventType::User(UserEvent::DeleteGroup),
+                    ),
+                    _ => (None, EventType::User(UserEvent::Other)),
+                };
+
+                if let Some(fields) = data {
+                    for &(name, idx) in fields {
+                        if let Some(m) = s.get(idx) {
+                            map.insert(name.to_string(), m.as_str().to_string());
                         }
                     }
-                    return Some(EventData {
-                        timestamp,
-                        service: Service::UserChange,
-                        event_type,
-                        data: map,
-                        raw_msg: RawMsgType::Structured(entry_map),
-                    });
                 }
+
+                return Some(EventData {
+                    timestamp,
+                    service: Service::UserChange,
+                    event_type,
+                    data: map,
+                    raw_msg: RawMsgType::Structured(entry_map),
+                });
+            }
+        }
+
+        for (name, regex) in filtered_regexes.iter() {
+            if let Some(s) = regex.captures(msg) {
+                let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                    "MODIFY_USER" => (Some(&[("name", 1)]), EventType::User(UserEvent::ModifyUser)),
+                    "MODIFY_GROUP" => (
+                        Some(&[("name", 1)]),
+                        EventType::User(UserEvent::DeleteGroup),
+                    ),
+                    "USER_PASSWD_CHANGE" => (
+                        Some(&[("process_id", 1), ("user", 2)]),
+                        EventType::User(UserEvent::Info),
+                    ),
+                    "USER_SHADOW_UPDATED" => (
+                        Some(&[("name", 1)]),
+                        EventType::User(UserEvent::DeleteGroup),
+                    ),
+                    _ => (None, EventType::User(UserEvent::Other)),
+                };
+
+                if let Some(fields) = data {
+                    for &(name, idx) in fields {
+                        if let Some(m) = s.get(idx) {
+                            map.insert(name.to_string(), m.as_str().to_string());
+                        }
+                    }
+                }
+
+                return Some(EventData {
+                    timestamp,
+                    service: Service::UserChange,
+                    event_type,
+                    data: map,
+                    raw_msg: RawMsgType::Structured(entry_map),
+                });
             }
         }
     }
@@ -668,7 +988,6 @@ pub fn parse_user_change_events(entry_map: Entry, ev_type: Option<Vec<&str>>) ->
 
 pub fn parse_pkg_events(content: String, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     let mut map = AHashMap::new();
-
     let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
         let names: Vec<&str> = ev_types
             .iter()
@@ -685,23 +1004,30 @@ pub fn parse_pkg_events(content: String, ev_type: Option<Vec<&str>>) -> Option<E
 
     for (name, regex) in filtered_regexes.iter() {
         if let Some(s) = regex.captures(&content) {
-            let timestamp = s.get(1).unwrap().as_str().to_string();
+            let timestamp = s.get(1).unwrap().as_str().to_owned();
+
             let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
-                "INSTALLED" => (Some(&[("pkg_name", 2)]), EventType::PkgInstalled),
-                "REMOVED" => (Some(&[("pkg_name", 2)]), EventType::PkgRemoved),
+                "INSTALLED" => (
+                    Some(&[("pkg_name", 2)]),
+                    EventType::Package(PkgEvent::Installed),
+                ),
+                "REMOVED" => (
+                    Some(&[("pkg_name", 2)]),
+                    EventType::Package(PkgEvent::Removed),
+                ),
                 "UPGRADED" => (
                     Some(&[("pkg_name", 2), ("version_from", 3), ("version_to", 4)]),
-                    EventType::PkgUpgraded,
+                    EventType::Package(PkgEvent::Upgraded),
                 ),
                 "DOWNGRADED" => (
                     Some(&[("pkg_name", 2), ("version_from", 3), ("version_to", 4)]),
-                    EventType::PkgDowndraded,
+                    EventType::Package(PkgEvent::Downgraded),
                 ),
                 "REINSTALLED" => (
                     Some(&[("pkg_name", 2), ("version", 3)]),
-                    EventType::PkgReinstalled,
+                    EventType::Package(PkgEvent::Reinstalled),
                 ),
-                _ => (None, EventType::Other),
+                _ => (None, EventType::Package(PkgEvent::Other)),
             };
 
             if let Some(fields) = data {
@@ -711,6 +1037,7 @@ pub fn parse_pkg_events(content: String, ev_type: Option<Vec<&str>>) -> Option<E
                     }
                 }
             }
+
             return Some(EventData {
                 timestamp,
                 service: Service::PkgManager,
@@ -752,22 +1079,36 @@ pub fn parse_config_change_events(
             let trimmed_msg = s.trim();
             if let Some(msg) = regex.captures(trimmed_msg) {
                 let (fields, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
-                    "CRON_CMD" => (Some(&[("user", 1), ("cron_cmd", 2)]), EventType::CmdRun),
+                    "CRON_CMD" => (
+                        Some(&[("user", 1), ("cron_cmd", 2)]),
+                        EventType::Config(ConfigEvent::CmdRun),
+                    ),
                     "CRON_RELOAD" => (
                         Some(&[("user", 1), ("cron_reload", 2)]),
-                        EventType::CronReload,
+                        EventType::Config(ConfigEvent::CronReload),
                     ),
-                    "CRON_ERROR_BAD_COMMAND" => (Some(&[("user", 1)]), EventType::Info),
-                    "CRON_ERROR_BAD_MINUTE" => (Some(&[("user", 1)]), EventType::Info),
-                    "CRON_ERROR_OTHER" => (Some(&[("user", 1)]), EventType::Info),
-
-                    "CRON_DENIED" => (Some(&[("user", 1)]), EventType::Failure),
-                    "CRON_SESSION_OPEN" => {
-                        (Some(&[("user", 1), ("uid", 2)]), EventType::SessionOpened)
+                    "CRON_ERROR_BAD_COMMAND" => {
+                        (Some(&[("user", 1)]), EventType::Config(ConfigEvent::Info))
                     }
-                    "CRON_SESSION_CLOSE" => (Some(&[("user", 1)]), EventType::SessionClosed),
-
-                    _ => (None, EventType::Other),
+                    "CRON_ERROR_BAD_MINUTE" => {
+                        (Some(&[("user", 1)]), EventType::Config(ConfigEvent::Info))
+                    }
+                    "CRON_ERROR_OTHER" => {
+                        (Some(&[("user", 1)]), EventType::Config(ConfigEvent::Info))
+                    }
+                    "CRON_DENIED" => (
+                        Some(&[("user", 1)]),
+                        EventType::Config(ConfigEvent::Failure),
+                    ),
+                    "CRON_SESSION_OPEN" => (
+                        Some(&[("user", 1), ("uid", 2)]),
+                        EventType::Config(ConfigEvent::SessionOpened),
+                    ),
+                    "CRON_SESSION_CLOSE" => (
+                        Some(&[("user", 1)]),
+                        EventType::Config(ConfigEvent::SessionClosed),
+                    ),
+                    _ => (None, EventType::Config(ConfigEvent::Other)),
                 };
 
                 if let Some(data) = fields {
@@ -792,23 +1133,33 @@ pub fn parse_config_change_events(
     None
 }
 
-fn format_syslog_timestamp(ts_microseconds: &str) -> String {
-    if let Ok(micros) = ts_microseconds.parse::<i64>() {
-        let dt: DateTime<Local> = Local.timestamp_micros(micros).unwrap();
-        dt.format("%b %e %H:%M:%S").to_string()
+fn format_syslog_timestamp(ts_str: &str) -> String {
+    if let Ok(value) = ts_str.parse::<i64>() {
+        let dt: Option<DateTime<Local>> = if value > 1_000_000_000_000_000 {
+            Local.timestamp_micros(value).single()
+        } else if value > 10_000_000_000 {
+            Local.timestamp_millis_opt(value).single()
+        } else {
+            Local.timestamp_opt(value, 0).single()
+        };
+
+        if let Some(datetime) = dt {
+            datetime.format("%b %e %H:%M:%S").to_string()
+        } else {
+            "invalid".into()
+        }
     } else {
         "invalid".into()
     }
 }
-
 pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     let msg = entry_map.get("MESSAGE")?;
-
     let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
         let names: Vec<&str> = ev_types
             .iter()
             .flat_map(|&s| str_to_regex_names(s).to_owned())
             .collect();
+
         NETWORK_REGEX
             .iter()
             .filter(|(name, _)| names.contains(name))
@@ -825,20 +1176,21 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
         .cloned()
         .unwrap_or_default();
     let timestamp = format_syslog_timestamp(&journal_timestamp);
+
     for (name, regex) in filtered_regexes {
         if let Some(caps) = regex.captures(s) {
             let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                 "DEVICE_ACTIVATION" => (
                     Some(&[("device", 1), ("result", 2), ("details", 3)]),
-                    EventType::ConnectionActivated,
+                    EventType::Network(NetEvent::ConnectionActivated),
                 ),
                 "DEVICE_STATE_CHANGE" => (
                     Some(&[("device", 1), ("from", 2), ("to", 3), ("reason", 4)]),
-                    EventType::StateChange,
+                    EventType::Network(NetEvent::StateChange),
                 ),
                 "MANAGER_STATE" => (
                     Some(&[("state", 1), ("version", 2), ("action", 3)]),
-                    EventType::StateChange,
+                    EventType::Network(NetEvent::StateChange),
                 ),
                 "DHCP_EVENT" => (
                     Some(&[
@@ -849,77 +1201,113 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
                         ("option", 5),
                         ("value", 6),
                     ]),
-                    EventType::DhcpLease,
+                    EventType::Network(NetEvent::DhcpLease),
                 ),
-                "DHCP_INIT" => (Some(&[("client", 1)]), EventType::DhcpLease),
+                "DHCP_INIT" => (
+                    Some(&[("client", 1)]),
+                    EventType::Network(NetEvent::DhcpLease),
+                ),
                 "POLICY_SET" => (
                     Some(&[("connection", 1), ("iface", 2), ("purpose", 3)]),
-                    EventType::PolicyChange,
+                    EventType::Network(NetEvent::PolicyChange),
                 ),
                 "SUPPLICANT_STATE" => (
                     Some(&[("device", 1), ("from", 2), ("to", 3)]),
-                    EventType::WifiAssociationSuccess,
+                    EventType::Network(NetEvent::WifiAssociationSuccess),
                 ),
-                "WIFI_SCAN" => (Some(&[("device", 1)]), EventType::WifiScan),
+                "WIFI_SCAN" => (
+                    Some(&[("device", 1)]),
+                    EventType::Network(NetEvent::WifiScan),
+                ),
                 "PLATFORM_ERROR" => (
                     Some(&[("operation", 1), ("details", 2), ("errno", 3), ("error", 4)]),
-                    EventType::Warning,
+                    EventType::Network(NetEvent::Warning),
                 ),
-                "SETTINGS_CONNECTION" => (Some(&[("msg", 1)]), EventType::ConnectionAttempt),
-                "DNS_CONFIG" => (Some(&[("msg", 1)]), EventType::DnsConfig),
-                "VPN_EVENT" => (Some(&[("msg", 1)]), EventType::VpnEvent),
-                "FIREWALL_EVENT" => (Some(&[("msg", 1)]), EventType::FirewallEvent),
-                "AGENT_REQUEST" => (Some(&[("msg", 1)]), EventType::AgentRequest),
-                "CONNECTIVITY_CHECK" => (Some(&[("msg", 1)]), EventType::ConnectivityCheck),
-                "DISPATCHER" => (Some(&[("msg", 1)]), EventType::DispatcherEvent),
+                "SETTINGS_CONNECTION" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetEvent::ConnectionAttempt),
+                ),
+                "DNS_CONFIG" => (Some(&[("msg", 1)]), EventType::Network(NetEvent::DnsConfig)),
+                "VPN_EVENT" => (Some(&[("msg", 1)]), EventType::Network(NetEvent::VpnEvent)),
+                "FIREWALL_EVENT" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetEvent::FirewallEvent),
+                ),
+                "AGENT_REQUEST" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetEvent::AgentRequest),
+                ),
+                "CONNECTIVITY_CHECK" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetEvent::ConnectivityCheck),
+                ),
+                "DISPATCHER" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetEvent::DispatcherEvent),
+                ),
                 "LINK_EVENT" => (
                     Some(&[("device", 1), ("state", 2), ("carrier", 3)]),
-                    EventType::LinkEvent,
+                    EventType::Network(NetEvent::LinkEvent),
                 ),
-                "VIRTUAL_DEVICE" => (Some(&[("msg", 1)]), EventType::VirtualDeviceEvent),
-                "AUDIT" => (Some(&[("msg", 1)]), EventType::AuditEvent),
-                "SYSTEMD" => (Some(&[("msg", 1)]), EventType::SystemdEvent),
-                "GENERIC" => (Some(&[("component", 1), ("msg", 2)]), EventType::Other),
-
+                "VIRTUAL_DEVICE" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetEvent::VirtualDeviceEvent),
+                ),
+                "AUDIT" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetEvent::AuditEvent),
+                ),
+                "SYSTEMD" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetEvent::SystemdEvent),
+                ),
+                "GENERIC" => (
+                    Some(&[("component", 1), ("msg", 2)]),
+                    EventType::Network(NetEvent::Other),
+                ),
                 "CONNECTION_ACTIVATED" => (
                     Some(&[("device", 1), ("type", 2)]),
-                    EventType::ConnectionActivated,
+                    EventType::Network(NetEvent::ConnectionActivated),
                 ),
                 "CONNECTION_DEACTIVATED" => (
                     Some(&[("device", 1), ("type", 2)]),
-                    EventType::ConnectionDeactivated,
+                    EventType::Network(NetEvent::ConnectionDeactivated),
                 ),
-                "DHCP_LEASE" => (Some(&[("device", 1), ("ip", 2)]), EventType::DhcpLease),
+                "DHCP_LEASE" => (
+                    Some(&[("device", 1), ("ip", 2)]),
+                    EventType::Network(NetEvent::DhcpLease),
+                ),
                 "IP_CONFIG" => (
                     Some(&[("timestamp", 1), ("device", 2)]),
-                    EventType::IpConfig,
+                    EventType::Network(NetEvent::IpConfig),
                 ),
                 "DEVICE_ADDED" => (
                     Some(&[("timestamp", 1), ("device_info", 2)]),
-                    EventType::DeviceAdded,
+                    EventType::Network(NetEvent::DeviceAdded),
                 ),
                 "DEVICE_REMOVED" => (
                     Some(&[("timestamp", 1), ("device_info", 2)]),
-                    EventType::DeviceRemoved,
+                    EventType::Network(NetEvent::DeviceRemoved),
                 ),
-                "WIFI_ASSOC_SUCCESS" => {
-                    (Some(&[("timestamp", 1)]), EventType::WifiAssociationSuccess)
-                }
+                "WIFI_ASSOC_SUCCESS" => (
+                    Some(&[("timestamp", 1)]),
+                    EventType::Network(NetEvent::WifiAssociationSuccess),
+                ),
                 "WIFI_AUTH_FAILURE" => (
                     Some(&[("timestamp", 1), ("reason", 2)]),
-                    EventType::WifiAuthFailure,
+                    EventType::Network(NetEvent::WifiAuthFailure),
                 ),
                 "STATE_CHANGE" => (
                     Some(&[("timestamp", 1), ("state", 2)]),
-                    EventType::StateChange,
+                    EventType::Network(NetEvent::StateChange),
                 ),
                 "CONNECTION_ATTEMPT" => (
                     Some(&[("timestamp", 1), ("connection", 2)]),
-                    EventType::ConnectionAttempt,
+                    EventType::Network(NetEvent::ConnectionAttempt),
                 ),
-                "WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
-                "UNKNOWN" => (Some(&[("msg", 1)]), EventType::Other),
-                _ => (Some(&[("msg", 1)]), EventType::Other),
+                "WARNING" => (Some(&[("msg", 1)]), EventType::Network(NetEvent::Warning)),
+                "UNKNOWN" => (Some(&[("msg", 1)]), EventType::Network(NetEvent::Other)),
+                _ => (Some(&[("msg", 1)]), EventType::Network(NetEvent::Other)),
             };
 
             if let Some(fields) = data {
@@ -929,6 +1317,7 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
                     }
                 }
             }
+
             return Some(EventData {
                 timestamp,
                 service: Service::NetworkManager,
@@ -968,38 +1357,65 @@ pub fn parse_firewalld_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> O
     for (name, regex) in filtered_regexes {
         if let Some(caps) = regex.captures(s) {
             let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
-                "SERVICE_STARTED" => (None, EventType::ServiceStarted),
-                "SERVICE_STOPPED" => (None, EventType::ServiceStopped),
-                "CONFIG_RELOADED" => (None, EventType::ConfigReloaded),
+                "SERVICE_STARTED" => (None, EventType::Firewall(FirewallEvent::ServiceStarted)),
+                "SERVICE_STOPPED" => (None, EventType::Firewall(FirewallEvent::ServiceStopped)),
+                "CONFIG_RELOADED" => (None, EventType::Firewall(FirewallEvent::ConfigReloaded)),
                 "ZONE_CHANGED" => (
                     Some(&[("zone", 1), ("interface", 2)]),
-                    EventType::ZoneChanged,
+                    EventType::Firewall(FirewallEvent::ZoneChanged),
                 ),
                 "SERVICE_MODIFIED" => (
                     Some(&[("service", 1), ("zone", 2)]),
-                    EventType::ServiceModified,
+                    EventType::Firewall(FirewallEvent::ServiceModified),
                 ),
                 "PORT_MODIFIED" => (
                     Some(&[("port", 1), ("protocol", 2), ("zone", 3)]),
-                    EventType::PortModified,
+                    EventType::Firewall(FirewallEvent::PortModified),
                 ),
-                "RULE_APPLIED" => (Some(&[("rule", 1)]), EventType::RuleApplied),
-                "IPTABLES_COMMAND" => (Some(&[("msg", 1)]), EventType::IptablesCommand),
+                "RULE_APPLIED" => (
+                    Some(&[("rule", 1)]),
+                    EventType::Firewall(FirewallEvent::RuleApplied),
+                ),
+                "IPTABLES_COMMAND" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Firewall(FirewallEvent::IptablesCommand),
+                ),
                 "INTERFACE_BINDING" => (
                     Some(&[("interface", 1), ("zone", 2)]),
-                    EventType::InterfaceBinding,
+                    EventType::Firewall(FirewallEvent::InterfaceBinding),
                 ),
-                "COMMAND_FAILED" => (Some(&[("msg", 1)]), EventType::CommandFailed),
-                "OPERATION_STATUS" => (Some(&[("msg", 1)]), EventType::OperationStatus),
+                "COMMAND_FAILED" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Firewall(FirewallEvent::CommandFailed),
+                ),
+                "OPERATION_STATUS" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Firewall(FirewallEvent::OperationStatus),
+                ),
                 "MODULE_MSG" => (
                     Some(&[("module", 1), ("msg", 2), ("details", 3)]),
-                    EventType::ModuleMessage,
+                    EventType::Firewall(FirewallEvent::ModuleMessage),
                 ),
-                "DBUS_MSG" => (Some(&[("msg", 1), ("details", 2)]), EventType::DBusMessage),
-                "WARNING" => (Some(&[("msg", 1)]), EventType::Warning),
-                "ERROR" => (Some(&[("msg", 1)]), EventType::FirwallError),
-                "INFO" => (Some(&[("msg", 1)]), EventType::Info),
-                _ => (Some(&[("msg", 1)]), EventType::Other),
+                "DBUS_MSG" => (
+                    Some(&[("msg", 1), ("details", 2)]),
+                    EventType::Firewall(FirewallEvent::DBusMessage),
+                ),
+                "WARNING" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Firewall(FirewallEvent::Warning),
+                ),
+                "ERROR" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Firewall(FirewallEvent::Error),
+                ),
+                "INFO" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Firewall(FirewallEvent::Info),
+                ),
+                _ => (
+                    Some(&[("msg", 1)]),
+                    EventType::Firewall(FirewallEvent::Other),
+                ),
             };
 
             if let Some(fields) = data {
@@ -1288,7 +1704,6 @@ pub fn process_manual_events_upto_n(opts: ParserFuncArgs) -> Result<Option<Curso
         let file_name = PathBuf::from("/var/log/pacman.log");
         let file = File::open(file_name).unwrap();
         let mut reader = BufReader::with_capacity(128 * 1024, file);
-        info!("Called pkgmanager.events");
         let mut count = 0;
         let mut buf = String::new();
         let mut line_count = 0;

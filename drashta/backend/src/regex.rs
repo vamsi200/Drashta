@@ -486,6 +486,45 @@ pub static FIREWALLD_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
         ]
 });
 
+pub static KERNEL_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
+    vec![
+            ("KERNEL_PANIC", Regex::new(r"(?x)^(?:Kernel\s+panic|kernel\s+panic)\s*[-:]\s*(.+?)(?:\s+CPU:\s*(\d+))?\s*$").unwrap()),
+            ("OOM_KILL", Regex::new(r"(?x)^(?:Out\s+of\s+memory|OOM\s+killer):\s*(?:Kill(?:ed|ing))?\s+process\s+(\d+)\s+\(([^\)]+)\)(?:\s+score\s+(\d+))?\s*").unwrap()),
+            ("SEGFAULT", Regex::new(r"(?x)^([^\[]+)\[(\d+)\]:\s+segfault\s+at\s+([0-9a-f]+)\s+ip\s+([0-9a-f]+)\s+sp\s+([0-9a-f]+)\s+error\s+(\d+)(?:\s+in\s+([^\[]+))?\s*").unwrap()),
+            ("USB_ERROR", Regex::new(r"(?x)^usb\s+([\d\-\.]+):\s+(.+?),\s+error\s+(-?\d+)\s*$").unwrap()),
+            ("USB_DESCRIPTOR_ERROR", Regex::new(r"(?x)^usb\s+([\d\-\.]+):\s+device\s+(?:descriptor|not\s+accepting\s+address)\s+(.+?),\s+error\s+(-?\d+)\s*$").unwrap()),
+            ("USB_DEVICE_EVENT", Regex::new(r"(?x)^usb\s+([\d\-\.]+):\s+(New\s+USB\s+device\s+found|USB\s+disconnect),\s+(.+?)(?:\s+idVendor=([0-9a-f]+),\s+idProduct=([0-9a-f]+))?\s*$").unwrap()),
+            ("DISK_ERROR", Regex::new(r"(?x)^(?:end_request|blk_update_request):\s+(?:I/O\s+error|critical\s+(?:medium|target)\s+error),\s+dev\s+(\S+),\s+sector\s+(\d+)(?:\s+op\s+([^\s]+))?\s*").unwrap()),
+            ("FS_MOUNT", Regex::new(r"(?x)^(?:EXT[234]|XFS|BTRFS|F2FS|VFAT|NTFS|ZFS)-fs\s+\(([^\)]+)\):\s+(mounted|unmounted|remounted)\s*(.+?)?\s*$").unwrap()),
+            ("FS_ERROR", Regex::new(r"(?x)^(?:EXT[234]|XFS|BTRFS|F2FS|NTFS|ZFS)-fs\s+(?:error|warning)\s+\(device\s+([^\)]+)\):(?:\s+(.+))?\s*$").unwrap()),
+            ("CPU_ERROR", Regex::new(r"(?x)^(?:CPU|cpu)\s*(\d+)?:?\s+(?:temperature|Machine\s+Check\s+Exception|MCE|hardware\s+error)\s*(.+?)\s*$").unwrap()),
+            ("MEMORY_ERROR", Regex::new(r"(?x)^(?:EDAC|Memory)\s+(?:error|CE|UE):?\s*(.+?)(?:\s+at\s+address\s+([0-9a-fx]+))?\s*$").unwrap()),
+            ("DEVICE_DETECTED", Regex::new(r"(?x)^(?:Found|Detected|Registered)\s+(?:device|hardware):\s+(.+?)(?:\s+at\s+([0-9a-fx:]+))?\s*$").unwrap()),
+            ("DRIVER_EVENT", Regex::new(r"(?x)^(?:Loading|Unloading|Loaded|Unloaded)\s+(?:module|driver):\s+([^\s]+)(?:\s+(.+))?\s*$").unwrap()),
+            ("NET_INTERFACE", Regex::new(r"(?x)^([a-z0-9]+):\s+(?:link\s+(?:up|down)|renamed\s+from\s+([a-z0-9]+)|NIC\s+Link\s+is\s+(?:Up|Down))\s*(?:at\s+(\d+)\s*(?:Mbps|Gbps))?\s*").unwrap()),
+            ("PCI_DEVICE", Regex::new(r"(?x)^pci\s+([0-9a-f:\.]+):\s+(.+?)\s*$").unwrap()),
+            ("ACPI_EVENT", Regex::new(r"(?x)^ACPI:?\s+(.+?)(?:\s+\[([^\]]+)\])?\s*$").unwrap()),
+            ("THERMAL_EVENT", Regex::new(r"(?x)^(?:thermal|Thermal|Critical\s+temperature):?\s+(?:CPU|cpu|GPU|gpu|zone\s*(\d+))?\s*(.+?)(?:\s+temperature:?\s+([0-9\.]+)(?:\s*°?C)?)?\s*$").unwrap()),
+            ("DMA_ERROR", Regex::new(r"(?x)^(?:DMA|dma):\s+(.+?)(?:\s+on\s+device\s+([^\s]+))?\s*$").unwrap()),
+            ("AUDIT_EVENT", Regex::new(r"(?x)^audit:?\s+type=(\d+)\s+(.+?)\s*$").unwrap()),
+            ("KERNEL_TAINT", Regex::new(r"(?x)^(?:Kernel\s+tainted:|Loading\s+tainted\s+module)\s+([^\s]+)(?:\s+(.+))?\s*$").unwrap()),
+            ("FIRMWARE_LOAD", Regex::new(r"(?x)^(?:firmware|Firmware):\s+(?:loading|loaded|failed\s+to\s+load)\s+([^\s]+)(?:\s+for\s+device\s+([^\s]+))?\s*$").unwrap()),
+            ("IRQ_EVENT", Regex::new(r"(?x)^(?:irq|IRQ)\s+(\d+):?\s+(.+?)\s*$").unwrap()),
+            ("TASK_KILLED", Regex::new(r"(?x)^(?:Killed|Killing)\s+process\s+(\d+)\s+\(([^\)]+)\)(?:\s+(.+))?\s*$").unwrap()),
+            ("RCU_STALL", Regex::new(r"(?x)^(?:rcu_sched|rcu_preempt)\s+(?:detected\s+stalls?|self-detected\s+stall)\s+on\s+CPU[s]?\s+(.+?)\s*$").unwrap()),
+            ("WATCHDOG", Regex::new(r"(?x)^(?:watchdog|Watchdog):\s+(.+?)(?:\s+on\s+CPU\s+(\d+))?\s*$").unwrap()),
+            ("BOOT_EVENT", Regex::new(r"(?x)^(?:Booting|Starting)\s+(?:kernel|Linux)\s+(?:version\s+)?([^\s]+)?\s*(.+?)?\s*$").unwrap()),
+            ("EMERG", Regex::new(r"(?x)^EMERGENCY:?\s+(.+\S)\s*$").unwrap()),
+            ("ALERT", Regex::new(r"(?x)^ALERT:?\s+(.+\S)\s*$").unwrap()),
+            ("CRITICAL", Regex::new(r"(?x)^(?:CRITICAL|critical):?\s+(.+\S)\s*$").unwrap()),
+            ("ERROR", Regex::new(r"(?x)^(?:ERROR|error):?\s+(.+\S)\s*$").unwrap()),
+            ("WARNING", Regex::new(r"(?x)^(?:WARNING|warning):?\s+(.+\S)\s*$").unwrap()),
+            ("NOTICE", Regex::new(r"(?x)^(?:NOTICE|notice):?\s+(.+\S)\s*$").unwrap()),
+            ("INFO", Regex::new(r"(?x)^(?:INFO|info):?\s+(.+\S)\s*$").unwrap()),
+            ("UNKNOWN", Regex::new(r"(?s)^(.*\S.*)$").unwrap()),
+        ]
+});
+
 pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
     match ev {
         // SSHD
@@ -579,6 +618,7 @@ pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
         "FirewalldError" => &["ERROR"],
         "FirewalldInfo" => &["INFO"],
         "FirewalldUnknown" => &["UNKNOWN"],
+        //TODO: Add others
         _ => &[],
     }
 }
