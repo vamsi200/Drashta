@@ -27,7 +27,7 @@ const SERVICES = [
   "Kernel",
   "ConfigChange",
   "PkgManager",
-  "Firewall",
+  "Firewalld",
   "NetworkManager",
 ];
 
@@ -601,7 +601,7 @@ export default function Dashboard() {
     if (selectedSource === "live") {
       setSelectedTimeRange(15);
     } else {
-      setSelectedTimeRange(43200);
+      setSelectedTimeRange(LIFETIME_VALUE);
     }
   }, [selectedSource]);
 
@@ -675,7 +675,7 @@ export default function Dashboard() {
       });
 
       es.onerror = () => {
-        console.error("⚠️ EventSource error, reconnecting in 3s...");
+        console.error("EventSource error, reconnecting in 3s...");
         es.close();
 
         reconnectTimer = window.setTimeout(() => {
@@ -1211,8 +1211,8 @@ export default function Dashboard() {
 
   return (
     <div className={`h-screen ${config.bg} flex flex-col overflow-hidden font-mono ${config.text}`}>
-      <div className={`${config.bg} border-b ${config.border} px-4 py-2 shadow-lg`}>
-        <div className="flex items-center justify-between gap-3 mb-2">
+      <div className={`${config.bg} px-3 py-3 shadow-lg`}>
+        <div className="flex items-center justify-between gap-3">
           <div className="flex-1">
             <input
               ref={searchInputRef}
@@ -1362,76 +1362,82 @@ export default function Dashboard() {
       </div>
 
       {showAnalytics && (
-        <div className={`h-100 border-b ${config.border} p-4 bg-opacity-50 overflow-auto`}>
+        <div className={`h-100 p-4 bg-opacity-50 overflow-auto`}>
           <LogCountChart logs={filteredAndSortedLogs} timeRange={selectedTimeRange} theme={theme} />
         </div>
       )}
-
       <div className={`flex-1 flex flex-col overflow-hidden ${config.bg} relative`}>
-        <div ref={parentRef} className={`flex-1 overflow-y-auto ${config.bg}`}>
-          {filteredAndSortedLogs.length === 0 ? (
-            <div className="flex items-center justify-center h-full">
-              <div className={`${config.accent} text-xs space-y-1 font-mono`}>
-                <div>$ no_logs_found --search</div>
-                <div className="opacity-50">✗ No results matching your query</div>
+        <div className={`flex-1 flex flex-col overflow-hidden border ${config.border} rounded-lg m-2 ${config.logRowBg}`}>
+          {selectedSource === "drain" && filteredAndSortedLogs.length > 0 && (
+            <div className={`px-3 py-4 flex justify-between items-center -mt-2`}>
+
+              <span className={`text-xs font-mono ${config.accent}`}>
+                Page {currentPage + 1} • {filteredAndSortedLogs.length} entries
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onMouseEnter={prefetchPreviousPage}
+                  onClick={handlePrevPage}
+                  disabled={currentPage === 0}
+                  className={`px-2 py-0.5 border ${config.border} rounded hover:opacity-80 disabled:opacity-30 transition-colors ${config.text} text-xs font-mono`}
+                >
+                  PREV
+                </button>
+                <button
+                  onMouseEnter={() => cursor && prefetchNextPage(cursor)}
+                  onClick={handleNextPage}
+                  disabled={!cursor}
+                  className={`px-2 py-0.5 rounded hover:opacity-80 disabled:opacity-30 transition-colors font-bold ${config.activeBtn} text-xs font-mono`}
+                >
+                  NEXT
+                </button>
               </div>
             </div>
-          ) : (
-            <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
-              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                const log = filteredAndSortedLogs[virtualRow.index];
-                const isExpanded = expandedLogs.has(virtualRow.index);
-
-                return (
-                  <div
-                    key={virtualRow.key}
-                    data-index={virtualRow.index}
-                    ref={rowVirtualizer.measureElement}
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      width: "100%",
-                      transform: `translateY(${virtualRow.start}px)`,
-                      willChange: 'transform',
-                      contain: 'layout style paint',
-                    }}
-                  >
-                    <TableLogRow
-                      log={log}
-                      isExpanded={isExpanded}
-                      onToggle={() => toggleLogExpansion(virtualRow.index)}
-                      onViewJson={openJsonPart}
-                      theme={theme}
-                    />
-                  </div>
-                );
-              })}
-            </div>
           )}
-        </div>
 
-        {selectedSource === "drain" && filteredAndSortedLogs.length > 0 && (
-          <div className="absolute bottom-2 right-4 flex items-center gap-2 text-xs font-mono">
-            <button
-              onMouseEnter={() => prefetchPreviousPage()}
-              onClick={handlePrevPage}
-              disabled={currentPage === 0}
-              className={`px-2 py-0.5 border ${config.border} rounded hover:opacity-80 disabled:opacity-30 transition-colors ${config.text}`}
-            >
-              [PREV]
-            </button>
-            <span className={config.accent}>{currentPage + 1}</span>
-            <button
-              onMouseEnter={() => cursor && prefetchNextPage(cursor)}
-              onClick={handleNextPage}
-              disabled={!cursor}
-              className={`px-2 py-0.5 rounded hover:opacity-80 disabled:opacity-30 transition-colors font-bold ${config.activeBtn}`}
-            >
-              [NEXT]
-            </button>
+          <div ref={parentRef} className={`flex-1 overflow-y-auto ${config.bg}`}>
+            {filteredAndSortedLogs.length === 0 ? (
+              <div className="flex items-center justify-center h-full">
+                <div className={`${config.accent} text-xs space-y-1 font-mono`}>
+                  <div>$ no_logs_found --search</div>
+                  <div className="opacity-50">✗ No results matching your query</div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
+                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const log = filteredAndSortedLogs[virtualRow.index];
+                  const isExpanded = expandedLogs.has(virtualRow.index);
+
+                  return (
+                    <div
+                      key={virtualRow.key}
+                      data-index={virtualRow.index}
+                      ref={rowVirtualizer.measureElement}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        transform: `translateY(${virtualRow.start}px)`,
+                        willChange: 'transform',
+                        contain: 'layout style paint',
+                      }}
+                    >
+                      <TableLogRow
+                        log={log}
+                        isExpanded={isExpanded}
+                        onToggle={() => toggleLogExpansion(virtualRow.index)}
+                        onViewJson={openJsonPart}
+                        theme={theme}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
       <JsonPart isOpen={jsonModal.isOpen} onClose={closeJsonPart} rawMsg={jsonModal.rawMsg} theme={theme} />
 
