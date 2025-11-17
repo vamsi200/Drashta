@@ -145,8 +145,8 @@ pub async fn drain_upto_n_entries(
 
         let mut last_cursor: Option<CursorType> = None;
 
-        info!("Invoked initial drain!");
         for ev in journal_units_clone {
+            info!("Invoked initial drain for service: {ev}");
             let opts = ParserFuncArgs::new(
                 ev.as_str(),
                 tx.clone(),

@@ -553,7 +553,6 @@ pub fn parse_sudo_login_attempts(
 
 pub fn parse_login_attempts(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     let mut map = AHashMap::new();
-
     let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
         let names: Vec<&str> = ev_types
             .iter()
@@ -569,40 +568,42 @@ pub fn parse_login_attempts(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
     };
 
     for (name, regex) in filtered_regexes.iter() {
-        let mut timestamp = String::new();
-        if let Some(tp) = entry_map.get("SYSLOG_TIMESTAMP") {
-            timestamp = tp.to_owned();
-        }
+        let journal_timestamp = entry_map
+            .get("_SOURCE_REALTIME_TIMESTAMP")
+            .cloned()
+            .unwrap_or_default();
+        let timestamp = format_syslog_timestamp(&journal_timestamp);
 
         if let Some(s) = entry_map.get("MESSAGE") {
             if let Some(msg) = regex.captures(s) {
                 let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
-                    "AUTH_FAILURE" => (
-                        Some(&[
-                            ("logname", 1),
-                            ("uid", 2),
-                            ("euid", 3),
-                            ("tty", 4),
-                            ("ruser", 5),
-                            ("rhost", 6),
-                        ]),
-                        EventType::Auth(AuthEvent::Failure),
-                    ),
+                    "AUTH_FAILURE" => (None, EventType::Auth(AuthEvent::Failure)),
 
-                    "AUTH_CHECK_PASS" | "AUTH_USER_UNKNOWN" | "FAILL0CK_USER_UNKNOWN" => {
+                    "AUTH_USER_UNKNOWN" | "FAILL0CK" | "ACCOUNT_EXPIRED" => {
                         (None, EventType::Auth(AuthEvent::Info))
                     }
 
-                    "NOLOGIN_REFUSED" | "ACCOUNT_EXPIRED" => {
-                        (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Info))
-                    }
+                    "NOLOGIN_REFUSED" => (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Info)),
 
                     "SESSION_OPENED" => (
-                        Some(&[("user", 1), ("uid", 2), ("LoginId", 3)]),
+                        Some(&[("user", 1)]),
                         EventType::Auth(AuthEvent::SessionOpened),
                     ),
-
                     "SESSION_CLOSED" => (
+                        Some(&[("user", 1)]),
+                        EventType::Auth(AuthEvent::SessionClosed),
+                    ),
+                    "SYSTEMD_NEW_SESSION" => (
+                        Some(&[("user", 1)]),
+                        EventType::Auth(AuthEvent::SessionOpened),
+                    ),
+                    "SYSTEMD_SESSION_CLOSED" => (None, EventType::Auth(AuthEvent::SessionClosed)),
+
+                    "SYSTEMD_SESSION_OPENED_UID" => (
+                        Some(&[("user", 1)]),
+                        EventType::Auth(AuthEvent::SessionOpened),
+                    ),
+                    "SYSTEMD_SESSION_CLOSED_UID" => (
                         Some(&[("user", 1)]),
                         EventType::Auth(AuthEvent::SessionClosed),
                     ),
@@ -612,15 +613,27 @@ pub fn parse_login_attempts(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
                         EventType::Auth(AuthEvent::Success),
                     ),
 
-                    "FAILED_LOGIN" | "FAILED_LOGIN_TTY" => (
-                        Some(&[("tries", 2), ("tty", 1), ("user", 3)]),
+                    "FAILED_LOGIN" => (None, EventType::Auth(AuthEvent::Failure)),
+                    "FAILED_LOGIN_TTY" => (
+                        Some(&[("tty", 1), ("user", 2)]),
                         EventType::Auth(AuthEvent::Failure),
                     ),
 
-                    "TOO_MANY_TRIES" => (
-                        Some(&[("tries", 1), ("tty", 2), ("user", 3)]),
-                        EventType::Auth(AuthEvent::TooManyAuthFailures),
-                    ),
+                    "SDDM_LOGIN_SUCCESS" => {
+                        (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Success))
+                    }
+                    "SDDM_LOGIN_FAILURE" => {
+                        (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Failure))
+                    }
+
+                    "FAILED_PASSWORD_SSH" => {
+                        (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Failure))
+                    }
+                    "INVALID_USER_ATTEMPT" => {
+                        (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Failure))
+                    }
+                    "ACCOUNT_LOCKED" => (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Failure)),
+                    "PASSWORD_CHANGED" => (Some(&[("user", 1)]), EventType::Auth(AuthEvent::Info)),
 
                     _ => (None, EventType::Auth(AuthEvent::Other)),
                 };
@@ -1464,7 +1477,8 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
     map.insert(
         "login.events",
         ServiceConfig {
-            matches: vec![("_COMM", "login")],
+            matches: vec![("SYSLOG_IDENTIFIER", "systemd-logind")],
+
             parser: parse_login_attempts,
         },
     );
@@ -1533,12 +1547,9 @@ pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> R
 
     journal.seek_head()?;
     let mut sent = 0;
-    let mut scanned = 0;
     let max_scan = limit * 10;
     while sent < limit {
         if let Some(data) = journal.next_entry()? {
-            scanned += 1;
-
             if let Some(ev) = (config.parser)(data, event_type.clone()) {
                 if !ev.raw_msg.contains_bytes(&filter) {
                     continue;
@@ -2041,10 +2052,8 @@ pub fn read_journal_logs(
     ev_type: Option<Vec<&str>>,
     tx: tokio::sync::broadcast::Sender<EventData>,
 ) -> anyhow::Result<()> {
-    use std::{collections::VecDeque, thread::sleep, time::Duration};
-
     let configs = get_service_configs();
-    let mut failed_ev_buf = VecDeque::new();
+    let mut failed_ev_buf = VecDeque::with_capacity(MAX_FAILED_EVENTS);
 
     let Some(config) = configs.get(service_name) else {
         anyhow::bail!("Unknown Service: {}", service_name);
