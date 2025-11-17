@@ -102,18 +102,80 @@ pub static SUDO_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
 
 pub static LOGIN_REGEXES: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
     vec![
-        ("AUTH_FAILURE", Regex::new(r"^pam_unix\(login:auth\): authentication failure; logname=(\S+) uid=(\d+) euid=(\d+) tty=(\S+) ruser=(\S*) rhost=(\S*)$").unwrap()),
-        ("AUTH_CHECK_PASS", Regex::new(r"^pam_unix\(login:auth\): check pass; user unknown$").unwrap()),
-        ("AUTH_USER_UNKNOWN", Regex::new(r"^pam_unix\(login:auth\): user (\S+) unknown$").unwrap()),
-        ("FAILL0CK_USER_UNKNOWN", Regex::new(r"^pam_faillock\(login:auth\): User unknown$").unwrap()),
-        ("NOLOGIN_REFUSED", Regex::new(r"^pam_nologin\(login:auth\): Refused user (\S+)").unwrap()),
-        ("ACCOUNT_EXPIRED", Regex::new(r"^pam_unix\(login:account\): account (\S+) has expired.*$").unwrap()),
-        ("SESSION_OPENED", Regex::new(r"^pam_unix\(login:session\): session opened for user (\S+)\(uid=(\d+)\) by LOGIN\(uid=(\d+)\)$").unwrap()),
-        ("SESSION_CLOSED", Regex::new(r"^pam_unix\(login:session\): session closed for user (\S+)$").unwrap()),
-        ("LOGIN_SUCCESS", Regex::new(r"^LOGIN ON (\S+) BY (\S+)$").unwrap()),
-        ("FAILED_LOGIN", Regex::new(r"^FAILED LOGIN \d+ (?:FROM (\S+) )?FOR (\S+), (.+)$").unwrap()),
-        ("FAILED_LOGIN_TTY", Regex::new(r"^FAILED LOGIN \d+ ON (\S+) FOR (\S+), (.+)$").unwrap()),
-        ("TOO_MANY_TRIES", Regex::new(r"^TOO MANY LOGIN TRIES \(\d+\) ON (\S+) FOR (\S+)$").unwrap()),
+        (
+            "AUTH_FAILURE",
+            Regex::new(r"pam_unix\([^:]+:auth\): authentication failure").unwrap(),
+        ),
+        (
+            "AUTH_USER_UNKNOWN",
+            Regex::new(r"pam_unix\([^:]+:auth\): .*user .* unknown").unwrap(),
+        ),
+        (
+            "FAILL0CK",
+            Regex::new(r"pam_faillock\([^:]+:auth\):.*").unwrap(),
+        ),
+        (
+            "ACCOUNT_EXPIRED",
+            Regex::new(r"pam_unix\([^:]+:account\): account .* has expired").unwrap(),
+        ),
+        (
+            "NOLOGIN_REFUSED",
+            Regex::new(r"pam_nologin\([^:]+:auth\): Refused user (\S+)").unwrap(),
+        ),
+        (
+            "SESSION_OPENED",
+            Regex::new(r"pam_unix\([^:]+:session\): session opened for user (\S+)").unwrap(),
+        ),
+        (
+            "SESSION_CLOSED",
+            Regex::new(r"pam_unix\([^:]+:session\): session closed for user (\S+)").unwrap(),
+        ),
+        (
+            "SYSTEMD_NEW_SESSION",
+            Regex::new(r"New session \S+ of user (\S+)").unwrap(),
+        ),
+        (
+            "SYSTEMD_SESSION_CLOSED",
+            Regex::new(r"Removed session \S+\.").unwrap(),
+        ),
+        (
+            "SDDM_LOGIN_SUCCESS",
+            Regex::new(r"Authentication for user (\S+) successful").unwrap(),
+        ),
+        (
+            "SDDM_LOGIN_FAILURE",
+            Regex::new(r"Authentication failed for user (\S+)").unwrap(),
+        ),
+        (
+            "FAILED_PASSWORD_SSH",
+            Regex::new(r"Failed password for (\S+) from \S+ port \d+ ssh2").unwrap(),
+        ),
+        (
+            "INVALID_USER_ATTEMPT",
+            Regex::new(r"Invalid user (\S+) from \S+").unwrap(),
+        ),
+        (
+            "ACCOUNT_LOCKED",
+            Regex::new(r"pam_tally2\(.*:auth\): user (\S+) has been locked due to .*").unwrap(),
+        ),
+        (
+            "PASSWORD_CHANGED",
+            Regex::new(r"pam_unix\(passwd:chauthtok\): password changed for (\S+)").unwrap(),
+        ),
+        (
+            "SYSTEMD_SESSION_OPENED_UID",
+            Regex::new(
+                r"pam_unix\(systemd-user:session\): session opened for user (\S+) \(uid=\d+\)",
+            )
+            .unwrap(),
+        ),
+        (
+            "SYSTEMD_SESSION_CLOSED_UID",
+            Regex::new(
+                r"pam_unix\(systemd-user:session\): session closed for user (\S+) \(uid=\d+\)",
+            )
+            .unwrap(),
+        ),
     ]
 });
 
@@ -236,6 +298,36 @@ pub static CRON_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
 
 pub static NETWORK_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
     vec![
+        (
+            "CONNECTION_ACTIVATED",
+            Regex::new(r"(?x)
+                ^<(?P<level>info|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?:
+                    connection-activation:\s+
+                    connection\s+'(?P<conn_old>[^']+)'\s+activated
+                    |
+                    device\s+\((?P<device>[^)]+)\):\s+
+                    Activation:\s+successful,?\s+
+                    (?:connection\s+'(?P<conn_new>[^']+)')?
+                )
+            ").unwrap(),
+        ),
+        (
+            "CONNECTION_DEACTIVATED",
+            Regex::new(r"(?x)
+                ^<(?P<level>info|warn|error)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?:
+                    connection-activation:\s+
+                    deactivated\s+connection\s+'(?P<conn_old>[^']+)'
+                    (?:\s+\(reason\s+'(?P<reason_old>[^']+)'\))?
+                    |
+                    device\s+\((?P<device>[^)]+)\):\s+
+                    state\s+change:\s+\S+\s+->\s+deactivated
+                    (?:\s+\(reason\s+'(?P<reason_new>[^']+)'\))?
+                )
+            ").unwrap(),
+        ),
+
         (
             "DEVICE_ACTIVATION",
             Regex::new(
@@ -457,6 +549,65 @@ pub static NETWORK_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
                 "
             ).unwrap(),
         ),
+            (
+            "DEVICE_ACTIVATION_WARN",
+            Regex::new(r"(?x)
+                ^<(?P<level>warn|error)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                device\s+\((?P<device>[^)]+)\):\s+
+                Activation:\s+(?P<result>failed),?\s+
+                (?P<details>.*?)\.?\s*$
+            ").unwrap(),
+        ),
+        (
+            "MANAGER_WARN",
+            Regex::new(r"(?x)
+                ^<(?P<level>warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                manager:\s+
+                (?P<msg>.*)$
+            ").unwrap(),
+        ),
+        (
+            "MANAGER_ERROR",
+            Regex::new(r"(?x)
+                ^<(?P<level>error)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                manager:\s+
+                (?P<msg>.*)$
+            ").unwrap(),
+        ),
+        (
+            "DHCP_ERROR",
+            Regex::new(r"(?x)
+                ^<(?P<level>warn|error)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                dhcp(?P<version>[46])?\s+\((?P<iface>[^)]+)\):\s+
+                (?P<msg>.*)$
+            ").unwrap(),
+        ),
+        (
+            "VPN_ERROR",
+            Regex::new(r"(?x)
+                ^<(?P<level>error|warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?:vpn-connection|vpn):\s+
+                (?P<msg>.*)$
+            ").unwrap(),
+        ),
+        (
+            "NM_WARNING",
+            Regex::new(r"(?x)
+                ^<(?P<level>warn)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?P<component>\S+):\s+
+                (?P<msg>.*)$
+            ").unwrap(),
+        ),
+
+        (
+            "NM_ERROR",
+            Regex::new(r"(?x)
+                ^<(?P<level>error)>\s+\[\s*(?P<ts>\d+\.\d+)\]\s+
+                (?P<component>\S+):\s+
+                (?P<msg>.*)$
+            ").unwrap(),
+        ),
+
         (
             "UNKNOWN",
             Regex::new(r"(?s)^(?P<msg>.+)$").unwrap(),
@@ -534,9 +685,14 @@ pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
         "SessionClosed" => &["SESSION_CLOSED"],
         "ConnectionClosed" => &["CONNECTION_CLOSED"],
         "TooManyAuthFailures" => &["TOO_MANY_AUTH"],
-        "Warning" => &["WARNING"],
+        "Warning" => &[
+            "NM_WARNING",
+            "DEVICE_ACTIVATION_WARN",
+            "MANAGER_WARN",
+            "WARNING",
+        ],
         "Info" => &["RECEIVED_DISCONNECT", "NEGOTIATION_FAILURE"],
-        "Other" => &["UNKNOWN"],
+        "Other" => &["UNKNOWN", "GENERIC"],
         // SUDO
         "IncorrectPassword" => &["INCORRECT_PASSWORD"],
         "AuthError" => &["AUTH_ERROR"],
@@ -588,18 +744,29 @@ pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
         "CronSessionClose" => &["CRON_SESSION_CLOSE"],
         "NewConnection" => &["CONNECTION_CLOSED"],
         // NETWORK MANAGER
-        "NetworkConnectionActivated" => &["CONNECTION_ACTIVATED"],
-        "NetworkConnectionDeactivated" => &["CONNECTION_DEACTIVATED"],
-        "NetworkDhcpLease" => &["DHCP_LEASE"],
-        "NetworkIpConfig" => &["IP_CONFIG"],
-        "NetworkDeviceAdded" => &["DEVICE_ADDED"],
-        "NetworkDeviceRemoved" => &["DEVICE_REMOVED"],
-        "NetworkWifiAssociationSuccess" => &["WIFI_ASSOC_SUCCESS"],
-        "NetworkWifiAuthFailure" => &["WIFI_AUTH_FAILURE"],
-        "NetworkStateChange" => &["STATE_CHANGE"],
-        "NetworkConnectionAttempt" => &["CONNECTION_ATTEMPT"],
-        "NetworkWarning" => &["WARNING"],
-        "NetworkUnknown" => &["UNKNOWN"],
+        "DeviceActivation" => &["DEVICE_ACTIVATION"],
+        "DeviceStateChange" => &["DEVICE_STATE_CHANGE"],
+        "ConnectionActivated" => &["CONNECTION_ACTIVATED"],
+        "ConnectionDeactivated" => &["CONNECTION_DEACTIVATED"],
+        "ManagerState" => &["MANAGER_STATE"],
+        "DhcpEvent" => &["DHCP_EVENT"],
+        "DhcpInit" => &["DHCP_INIT"],
+        "PolicySet" => &["POLICY_SET"],
+        "SupplicantState" => &["SUPPLICANT_STATE"],
+        "WifiScan" => &["WIFI_SCAN"],
+        "PlatformError" => &["PLATFORM_ERROR"],
+        "SettingsConnection" => &["SETTINGS_CONNECTION"],
+        "DnsConfig" => &["DNS_CONFIG"],
+        "VpnEvent" => &["VPN_EVENT"],
+        "FirewallEvent" => &["FIREWALL_EVENT"],
+        "AgentRequest" => &["AGENT_REQUEST"],
+        "ConnectivityCheck" => &["CONNECTIVITY_CHECK"],
+        "Dispatcher" => &["DISPATCHER"],
+        "LinkEvent" => &["LINK_EVENT"],
+        "VirtualDevice" => &["VIRTUAL_DEVICE"],
+        "Audit" => &["AUDIT"],
+        "Systemd" => &["SYSTEMD"],
+        "Unknown" => &["UNKNOWN"],
         // FIREWALLD
         "FirewalldServiceStarted" => &["SERVICE_STARTED"],
         "FirewalldServiceStopped" => &["SERVICE_STOPPED"],

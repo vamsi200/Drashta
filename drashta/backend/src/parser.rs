@@ -1195,6 +1195,29 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
     for (name, regex) in filtered_regexes {
         if let Some(caps) = regex.captures(s) {
             let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                "ConnectionActivated" => (
+                    Some(&[
+                        ("level", 1),
+                        ("ts", 2),
+                        ("conn_old", 3),
+                        ("device", 4),
+                        ("conn_new", 5),
+                    ]),
+                    EventType::Network(NetworkEvent::ConnectionActivated),
+                ),
+
+                "ConnectionDeactivated" => (
+                    Some(&[
+                        ("level", 1),
+                        ("ts", 2),
+                        ("conn_old", 3),
+                        ("reason_old", 4),
+                        ("device", 5),
+                        ("reason_new", 6),
+                    ]),
+                    EventType::Network(NetworkEvent::ConnectionDeactivated),
+                ),
+
                 "DEVICE_ACTIVATION" => (
                     Some(&[("device", 1), ("result", 2), ("details", 3)]),
                     EventType::Network(NetworkEvent::ConnectionActivated),
@@ -1337,12 +1360,12 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
 
                 "DHCP_ERROR" => (
                     Some(&[("iface", 1), ("version", 2), ("msg", 3)]),
-                    EventType::Network(NetworkEvent::DhcpLease), // or maybe Warning / Error depending how you categorize
+                    EventType::Network(NetworkEvent::DhcpLease),
                 ),
 
                 "VPN_ERROR" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetworkEvent::VpnEvent), // or Error
+                    EventType::Network(NetworkEvent::VpnEvent),
                 ),
 
                 "NM_WARNING" => (
