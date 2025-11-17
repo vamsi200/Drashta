@@ -65,7 +65,7 @@ pub struct FilterEvent {
 pub async fn drain_older_logs(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    let (tx, mut rx) = mpsc::channel::<EventData>(1024);
+    let (tx, mut rx) = mpsc::channel::<EventData>(102400);
     let mut journal_units = Journalunits::new();
 
     match filter_event.0.event_name {

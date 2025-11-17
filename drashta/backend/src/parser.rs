@@ -154,7 +154,7 @@ pub enum ConfigEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-pub enum NetEvent {
+pub enum NetworkEvent {
     NewConnection,
     ConnectionActivated,
     ConnectionDeactivated,
@@ -180,6 +180,7 @@ pub enum NetEvent {
     SystemdEvent,
     Warning,
     Other,
+    Error,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -254,7 +255,7 @@ pub enum EventType {
     Auth(AuthEvent),
     User(UserEvent),
     Package(PkgEvent),
-    Network(NetEvent),
+    Network(NetworkEvent),
     Firewall(FirewallEvent),
     Kernel(KernelEvent),
     Config(ConfigEvent),
@@ -1167,6 +1168,7 @@ fn format_syslog_timestamp(ts_str: &str) -> String {
 }
 pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     let msg = entry_map.get("MESSAGE")?;
+
     let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
         let names: Vec<&str> = ev_types
             .iter()
@@ -1195,132 +1197,164 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
             let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
                 "DEVICE_ACTIVATION" => (
                     Some(&[("device", 1), ("result", 2), ("details", 3)]),
-                    EventType::Network(NetEvent::ConnectionActivated),
+                    EventType::Network(NetworkEvent::ConnectionActivated),
                 ),
+
                 "DEVICE_STATE_CHANGE" => (
-                    Some(&[("device", 1), ("from", 2), ("to", 3), ("reason", 4)]),
-                    EventType::Network(NetEvent::StateChange),
+                    Some(&[
+                        ("device", 1),
+                        ("from", 2),
+                        ("to", 3),
+                        ("reason", 4),
+                        ("sys_state", 5),
+                        ("mgmt_type", 6),
+                    ]),
+                    EventType::Network(NetworkEvent::StateChange),
                 ),
+
                 "MANAGER_STATE" => (
                     Some(&[("state", 1), ("version", 2), ("action", 3)]),
-                    EventType::Network(NetEvent::StateChange),
+                    EventType::Network(NetworkEvent::StateChange),
                 ),
+
                 "DHCP_EVENT" => (
                     Some(&[
-                        ("iface", 1),
-                        ("version", 2),
+                        ("version", 1),
+                        ("iface", 2),
                         ("from", 3),
                         ("to", 4),
                         ("option", 5),
                         ("value", 6),
+                        ("msg", 7),
                     ]),
-                    EventType::Network(NetEvent::DhcpLease),
+                    EventType::Network(NetworkEvent::DhcpLease),
                 ),
+
                 "DHCP_INIT" => (
                     Some(&[("client", 1)]),
-                    EventType::Network(NetEvent::DhcpLease),
+                    EventType::Network(NetworkEvent::DhcpLease),
                 ),
+
                 "POLICY_SET" => (
                     Some(&[("connection", 1), ("iface", 2), ("purpose", 3)]),
-                    EventType::Network(NetEvent::PolicyChange),
+                    EventType::Network(NetworkEvent::PolicyChange),
                 ),
+
                 "SUPPLICANT_STATE" => (
                     Some(&[("device", 1), ("from", 2), ("to", 3)]),
-                    EventType::Network(NetEvent::WifiAssociationSuccess),
+                    EventType::Network(NetworkEvent::WifiAssociationSuccess),
                 ),
+
                 "WIFI_SCAN" => (
                     Some(&[("device", 1)]),
-                    EventType::Network(NetEvent::WifiScan),
+                    EventType::Network(NetworkEvent::WifiScan),
                 ),
+
                 "PLATFORM_ERROR" => (
-                    Some(&[("operation", 1), ("details", 2), ("errno", 3), ("error", 4)]),
-                    EventType::Network(NetEvent::Warning),
+                    Some(&[
+                        ("operation", 1),
+                        ("details", 2),
+                        ("errno", 3),
+                        ("error", 4),
+                        ("msg", 5),
+                    ]),
+                    EventType::Network(NetworkEvent::Warning),
                 ),
+
                 "SETTINGS_CONNECTION" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetEvent::ConnectionAttempt),
+                    EventType::Network(NetworkEvent::ConnectionAttempt),
                 ),
-                "DNS_CONFIG" => (Some(&[("msg", 1)]), EventType::Network(NetEvent::DnsConfig)),
-                "VPN_EVENT" => (Some(&[("msg", 1)]), EventType::Network(NetEvent::VpnEvent)),
+
+                "DNS_CONFIG" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetworkEvent::DnsConfig),
+                ),
+
+                "VPN_EVENT" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetworkEvent::VpnEvent),
+                ),
+
                 "FIREWALL_EVENT" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetEvent::FirewallEvent),
+                    EventType::Network(NetworkEvent::FirewallEvent),
                 ),
+
                 "AGENT_REQUEST" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetEvent::AgentRequest),
+                    EventType::Network(NetworkEvent::AgentRequest),
                 ),
+
                 "CONNECTIVITY_CHECK" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetEvent::ConnectivityCheck),
+                    EventType::Network(NetworkEvent::ConnectivityCheck),
                 ),
+
                 "DISPATCHER" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetEvent::DispatcherEvent),
+                    EventType::Network(NetworkEvent::DispatcherEvent),
                 ),
+
                 "LINK_EVENT" => (
                     Some(&[("device", 1), ("state", 2), ("carrier", 3)]),
-                    EventType::Network(NetEvent::LinkEvent),
+                    EventType::Network(NetworkEvent::LinkEvent),
                 ),
+
                 "VIRTUAL_DEVICE" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetEvent::VirtualDeviceEvent),
+                    EventType::Network(NetworkEvent::VirtualDeviceEvent),
                 ),
+
                 "AUDIT" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetEvent::AuditEvent),
+                    EventType::Network(NetworkEvent::AuditEvent),
                 ),
+
                 "SYSTEMD" => (
                     Some(&[("msg", 1)]),
-                    EventType::Network(NetEvent::SystemdEvent),
+                    EventType::Network(NetworkEvent::SystemdEvent),
                 ),
+
                 "GENERIC" => (
                     Some(&[("component", 1), ("msg", 2)]),
-                    EventType::Network(NetEvent::Other),
+                    EventType::Network(NetworkEvent::Other),
                 ),
-                "CONNECTION_ACTIVATED" => (
-                    Some(&[("device", 1), ("type", 2)]),
-                    EventType::Network(NetEvent::ConnectionActivated),
+
+                "UNKNOWN" => (Some(&[("msg", 1)]), EventType::Network(NetworkEvent::Other)),
+
+                "DEVICE_ACTIVATION_WARN" => (
+                    Some(&[("device", 1), ("result", 2), ("details", 3)]),
+                    EventType::Network(NetworkEvent::Warning),
                 ),
-                "CONNECTION_DEACTIVATED" => (
-                    Some(&[("device", 1), ("type", 2)]),
-                    EventType::Network(NetEvent::ConnectionDeactivated),
+
+                "MANAGER_WARN" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetworkEvent::Warning),
                 ),
-                "DHCP_LEASE" => (
-                    Some(&[("device", 1), ("ip", 2)]),
-                    EventType::Network(NetEvent::DhcpLease),
+
+                "MANAGER_ERROR" => (Some(&[("msg", 1)]), EventType::Network(NetworkEvent::Error)),
+
+                "DHCP_ERROR" => (
+                    Some(&[("iface", 1), ("version", 2), ("msg", 3)]),
+                    EventType::Network(NetworkEvent::DhcpLease), // or maybe Warning / Error depending how you categorize
                 ),
-                "IP_CONFIG" => (
-                    Some(&[("timestamp", 1), ("device", 2)]),
-                    EventType::Network(NetEvent::IpConfig),
+
+                "VPN_ERROR" => (
+                    Some(&[("msg", 1)]),
+                    EventType::Network(NetworkEvent::VpnEvent), // or Error
                 ),
-                "DEVICE_ADDED" => (
-                    Some(&[("timestamp", 1), ("device_info", 2)]),
-                    EventType::Network(NetEvent::DeviceAdded),
+
+                "NM_WARNING" => (
+                    Some(&[("component", 1), ("msg", 2)]),
+                    EventType::Network(NetworkEvent::Warning),
                 ),
-                "DEVICE_REMOVED" => (
-                    Some(&[("timestamp", 1), ("device_info", 2)]),
-                    EventType::Network(NetEvent::DeviceRemoved),
+
+                "NM_ERROR" => (
+                    Some(&[("component", 1), ("msg", 2)]),
+                    EventType::Network(NetworkEvent::Error),
                 ),
-                "WIFI_ASSOC_SUCCESS" => (
-                    Some(&[("timestamp", 1)]),
-                    EventType::Network(NetEvent::WifiAssociationSuccess),
-                ),
-                "WIFI_AUTH_FAILURE" => (
-                    Some(&[("timestamp", 1), ("reason", 2)]),
-                    EventType::Network(NetEvent::WifiAuthFailure),
-                ),
-                "STATE_CHANGE" => (
-                    Some(&[("timestamp", 1), ("state", 2)]),
-                    EventType::Network(NetEvent::StateChange),
-                ),
-                "CONNECTION_ATTEMPT" => (
-                    Some(&[("timestamp", 1), ("connection", 2)]),
-                    EventType::Network(NetEvent::ConnectionAttempt),
-                ),
-                "WARNING" => (Some(&[("msg", 1)]), EventType::Network(NetEvent::Warning)),
-                "UNKNOWN" => (Some(&[("msg", 1)]), EventType::Network(NetEvent::Other)),
-                _ => (Some(&[("msg", 1)]), EventType::Network(NetEvent::Other)),
+                _ => (Some(&[("msg", 1)]), EventType::Network(NetworkEvent::Other)),
             };
 
             if let Some(fields) = data {
@@ -1494,10 +1528,7 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
     map.insert(
         "networkmanager.events",
         ServiceConfig {
-            matches: vec![
-                ("_SYSTEMD_UNIT", "NetworkManager.service"),
-                ("_EXE", "/usr/bin/NetworkManager"),
-            ],
+            matches: vec![("_SYSTEMD_UNIT", "NetworkManager.service")],
             parser: parse_network_events,
         },
     );
@@ -1572,7 +1603,6 @@ pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> R
 
 pub fn process_older_logs(
     opts: ParserFuncArgs,
-    ev_type: Option<Vec<&str>>,
     config: &ServiceConfig,
     cursor: String,
 ) -> Result<String> {
@@ -1587,31 +1617,39 @@ pub fn process_older_logs(
         keyword = filter;
     }
 
-    for (field, value) in &config.matches {
+    for (i, (field, value)) in config.matches.iter().enumerate() {
         journal.match_add(field, value.to_string())?;
-        journal.match_or()?;
+        if i < config.matches.len() - 1 {
+            journal.match_or()?;
+        }
     }
     journal.seek_cursor(&cursor)?;
     journal.next_entry()?;
 
     let mut count = 0;
     let mut last_cursor = cursor.clone();
-
     while count < limit {
         match journal.next_entry()? {
             Some(data) => {
-                if let Some(ev) = (config.parser)(data, ev_type.clone()) {
+                count += 1;
+
+                if let Some(ev) = (config.parser)(data, event_type.clone()) {
                     if !ev.raw_msg.contains_bytes(keyword.as_str()) {
                         continue;
                     }
+
                     if tx.blocking_send(ev).is_err() {
                         error!("Event Dropped!");
+                        continue;
                     }
-                    count += 1;
                 }
+
                 last_cursor = journal.cursor()?;
             }
-            None => break,
+            None => {
+                info!("No More Entries!");
+                break;
+            }
         }
     }
 
@@ -1653,6 +1691,7 @@ pub fn process_previous_logs(
                     }
                     if tx.blocking_send(ev).is_err() {
                         error!("Event Dropped!");
+                        continue;
                     }
                     count += 1;
                 }
@@ -1684,7 +1723,7 @@ pub fn process_service_logs(
 
     let new_cursor = match (cursor, processlogtype) {
         (Some(cursor), ProcessLogType::ProcessOlderLogs) => {
-            process_older_logs(opts, event_type, config, cursor)?
+            process_older_logs(opts, config, cursor)?
         }
         (Some(cursor), ProcessLogType::ProcessPreviousLogs) => {
             process_previous_logs(opts, config, cursor)?
