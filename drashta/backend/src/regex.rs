@@ -93,7 +93,7 @@ pub static SUDO_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
             ("SESSION_OPENED_SU", Regex::new(r"^pam_unix\(su:session\): session opened for user (\w+)\(uid=(\d+)\) by (\w+)\(uid=(\d+)\)$").unwrap()),
             ("SESSION_CLOSED", Regex::new(r"^pam_unix\(sudo:session\):\s+session closed for user (\S+)$").unwrap()),
             ("AUTH_FAILURE", Regex::new(r"^pam_unix\(sudo:auth\): authentication failure; logname=(\S+) uid=(\d+) euid=(\d+) tty=(\S+) ruser=(\S+) rhost=(\S*)\s+user=(\S+)$").unwrap()),
-            ("INCORRECT_PASSWORD", Regex::new(r"^(\S+)\s+:\s+(\d+)\s+incorrect password attempt ; TTY=(\S+) ; PWD=(\S+) ; USER=(\S+) ; COMMAND=(\S+)$").unwrap()),
+            ("INCORRECT_PASSWORD", Regex::new(r"^\S+\s+:\s+(\d+)\s+incorrect password attempts?\s+;\s+TTY=(\S+)\s+;\s+PWD=(\S+)\s+;\s+USER=(\S+)\s+;\s+COMMAND=(.+)$").unwrap()),
             ("NOT_IN_SUDOERS", Regex::new(r"(?x)^\s*(?P<user>\S+)\s+is\s+not\s+in\s+the\s+sudoers\s+file").unwrap()),
             ("AUTH_ERROR", Regex::new(r"(?x)pam_unix\(sudo:auth\):\s+(?P<msg>.+?)(?:\s+\[ (?P<user>\w+) \])?\s*$").unwrap()),
             ("SUDO_WARNING", Regex::new(r"(?x)^sudo:\s+(?P<msg>.+)$").unwrap()),
@@ -678,62 +678,78 @@ pub static KERNEL_REGEX: Lazy<Vec<(&str, Regex)>> = Lazy::new(|| {
 
 pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
     match ev {
-        // SSHD
-        "Success" => &["AUTH_SUCCESS"],
-        "Failure" => &["AUTH_FAILURE"],
-        "SessionOpened" => &["SESSION_OPENED"],
-        "SessionClosed" => &["SESSION_CLOSED"],
+        "Success" => &["AUTH_SUCCESS", "SDDM_LOGIN_SUCCESS"],
+        "Failure" => &[
+            "AUTH_FAILURE",
+            "SDDM_LOGIN_FAILURE",
+            "FAILED_PASSWORD_SSH",
+            "INVALID_USER_ATTEMPT",
+        ],
+        "SessionOpened" => &[
+            "SESSION_OPENED",
+            "SYSTEMD_NEW_SESSION",
+            "SYSTEMD_SESSION_OPENED_UID",
+        ],
+        "SessionClosed" => &[
+            "SESSION_CLOSED",
+            "SYSTEMD_SESSION_CLOSED",
+            "SYSTEMD_SESSION_CLOSED_UID",
+        ],
+
         "ConnectionClosed" => &["CONNECTION_CLOSED"],
         "TooManyAuthFailures" => &["TOO_MANY_AUTH"],
         "Warning" => &[
+            "WARNING",
             "NM_WARNING",
             "DEVICE_ACTIVATION_WARN",
             "MANAGER_WARN",
-            "WARNING",
+            "SUDO_WARNING",
         ],
-        "Info" => &["RECEIVED_DISCONNECT", "NEGOTIATION_FAILURE"],
+        "Info" => &["RECEIVED_DISCONNECT", "NEGOTIATION_FAILURE", "INFO"],
         "Other" => &["UNKNOWN", "GENERIC"],
-        // SUDO
+        "Unknown" => &["UNKNOWN"],
+
+        // SUDO Events
         "IncorrectPassword" => &["INCORRECT_PASSWORD"],
         "AuthError" => &["AUTH_ERROR"],
-        "AuthFailure" => &["AUTH_FAILURE"],
         "CmdRun" => &["COMMAND_RUN"],
         "SessionOpenedSudo" => &["SESSION_OPENED_SUDO", "SESSION_OPENED_SU"],
-        "SudoWarning" => &["SUDO_WARNING"],
         "NotInSudoers" => &["NOT_IN_SUDOERS"],
-        // LOGIN
-        "LoginSuccess" => &["LOGIN_SUCCESS"],
-        "FailedLogin" => &["FAILED_LOGIN", "FAILED_LOGIN_TTY"],
-        "TooManyTries" => &["TOO_MANY_TRIES"],
-        "AuthCheckPass" => &["AUTH_CHECK_PASS"],
+
+        // Login Events
         "AuthUserUnknown" => &["AUTH_USER_UNKNOWN"],
-        "FaillockUserUnknown" => &["FAILL0CK_USER_UNKNOWN"],
+        "FaillockUserUnknown" => &["FAILL0CK"],
         "NoLoginRefused" => &["NOLOGIN_REFUSED"],
         "AccountExpired" => &["ACCOUNT_EXPIRED"],
-        "SessionOpenedLogin" => &["SESSION_OPENED"],
-        "SessionClosedLogin" => &["SESSION_CLOSED"],
-        // USER CREATION
+        "AccountLocked" => &["ACCOUNT_LOCKED"],
+        "PasswordChanged" => &["PASSWORD_CHANGED"],
+
+        // User Creation Events
         "NewUser" => &["NEW_USER"],
         "NewGroup" => &["NEW_GROUP"],
         "GroupAddedEtcGroup" => &["GROUP_ADDED_ETC_GROUP"],
         "GroupAddedEtcGshadow" => &["GROUP_ADDED_ETC_GSHADOW"],
-        // USER DELETION
+
+        // User Deletion Events
         "DeleteUser" => &["DELETE_USER"],
         "DeleteUserHome" => &["DELETE_USER_HOME"],
         "DeleteUserMail" => &["DELETE_USER_MAIL"],
         "DeleteGroup" => &["DELETE_GROUP"],
-        // USER MODIFICATION
+
+        // User Modification Events
         "ModifyUser" => &["MODIFY_USER"],
         "ModifyGroup" => &["MODIFY_GROUP"],
         "PasswdChange" => &["USER_PASSWD_CHANGE"],
         "ShadowUpdated" => &["USER_SHADOW_UPDATED"],
-        // PKG EVENTS
+
+        // Package Events
         "PkgInstalled" => &["INSTALLED"],
         "PkgRemoved" => &["REMOVED"],
         "PkgUpgraded" => &["UPGRADED"],
-        "PkgDowndraded" => &["DOWNGRADED"],
+        "PkgDowngraded" => &["DOWNGRADED"],
         "PkgReinstalled" => &["REINSTALLED"],
-        // CRON
+
+        // Cron Events
         "CronCmd" => &["CRON_CMD"],
         "CronReload" => &["CRON_RELOAD"],
         "CronErrorBadCommand" => &["CRON_ERROR_BAD_COMMAND"],
@@ -742,8 +758,8 @@ pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
         "CronDenied" => &["CRON_DENIED"],
         "CronSessionOpen" => &["CRON_SESSION_OPEN"],
         "CronSessionClose" => &["CRON_SESSION_CLOSE"],
-        "NewConnection" => &["CONNECTION_CLOSED"],
-        // NETWORK MANAGER
+
+        // Network Manager Events
         "DeviceActivation" => &["DEVICE_ACTIVATION"],
         "DeviceStateChange" => &["DEVICE_STATE_CHANGE"],
         "ConnectionActivated" => &["CONNECTION_ACTIVATED"],
@@ -766,8 +782,8 @@ pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
         "VirtualDevice" => &["VIRTUAL_DEVICE"],
         "Audit" => &["AUDIT"],
         "Systemd" => &["SYSTEMD"],
-        "Unknown" => &["UNKNOWN"],
-        // FIREWALLD
+
+        // Firewalld Events
         "FirewalldServiceStarted" => &["SERVICE_STARTED"],
         "FirewalldServiceStopped" => &["SERVICE_STOPPED"],
         "FirewalldConfigReloaded" => &["CONFIG_RELOADED"],
@@ -781,11 +797,47 @@ pub fn str_to_regex_names(ev: &str) -> &'static [&'static str] {
         "FirewalldOperationStatus" => &["OPERATION_STATUS"],
         "FirewalldModuleMessage" => &["MODULE_MSG"],
         "FirewalldDBusMessage" => &["DBUS_MSG"],
-        "FirewalldWarning" => &["WARNING"],
-        "FirewalldError" => &["ERROR"],
-        "FirewalldInfo" => &["INFO"],
-        "FirewalldUnknown" => &["UNKNOWN"],
-        //TODO: Add others
+
+        // Kernel Events
+        "KernelPanic" => &["KERNEL_PANIC"],
+        "OomKill" => &["OOM_KILL"],
+        "Segfault" => &["SEGFAULT"],
+        "UsbError" => &["USB_ERROR"],
+        "UsbDescriptorError" => &["USB_DESCRIPTOR_ERROR"],
+        "UsbDeviceEvent" => &["USB_DEVICE_EVENT"],
+        "DiskError" => &["DISK_ERROR"],
+        "FsMount" => &["FS_MOUNT"],
+        "FsError" => &["FS_ERROR"],
+        "CpuError" => &["CPU_ERROR"],
+        "MemoryError" => &["MEMORY_ERROR"],
+        "DeviceDetected" => &["DEVICE_DETECTED"],
+        "DriverEvent" => &["DRIVER_EVENT"],
+        "NetInterface" => &["NET_INTERFACE"],
+        "PciDevice" => &["PCI_DEVICE"],
+        "AcpiEvent" => &["ACPI_EVENT"],
+        "ThermalEvent" => &["THERMAL_EVENT"],
+        "DmaError" => &["DMA_ERROR"],
+        "AuditEvent" => &["AUDIT_EVENT"],
+        "KernelTaint" => &["KERNEL_TAINT"],
+        "FirmwareLoad" => &["FIRMWARE_LOAD"],
+        "IrqEvent" => &["IRQ_EVENT"],
+        "TaskKilled" => &["TASK_KILLED"],
+        "RcuStall" => &["RCU_STALL"],
+        "Watchdog" => &["WATCHDOG"],
+        "BootEvent" => &["BOOT_EVENT"],
+        "Emerg" => &["EMERG"],
+        "Alert" => &["ALERT"],
+        "Critical" => &["CRITICAL"],
+        "Error" => &["ERROR"],
+        "Notice" => &["NOTICE"],
+
+        // Protocol Mismatch Events
+        "InvalidProtocolId" => &["INVALID_PROTOCOL_ID"],
+        "BadProtocolVersion" => &["BAD_PROTOCOL_VERSION"],
+        "MajorVersionDiff" => &["MAJOR_VERSION_DIFF"],
+        "BannerOrDispatchError" => &["BANNER_OR_DISPATCH_ERROR"],
+        "SocketReadFailure" => &["SOCKET_READ_FAILURE"],
+
         _ => &[],
     }
 }

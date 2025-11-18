@@ -1600,9 +1600,9 @@ pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> R
     }
 
     journal.seek_head()?;
-    let mut sent = 0;
+    let mut count = 0;
     let max_scan = limit * 10;
-    while sent < limit {
+    while count < limit {
         if let Some(data) = journal.next_entry()? {
             if let Some(ev) = (config.parser)(data, event_type.clone()) {
                 if !ev.raw_msg.contains_bytes(&filter) {
@@ -1611,9 +1611,8 @@ pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> R
 
                 if tx.try_send(ev).is_err() {
                     continue;
-                } else {
-                    sent += 1;
                 }
+                count += 1;
             }
         } else {
             break;
@@ -1708,6 +1707,7 @@ pub fn process_previous_logs(
     while count < limit {
         match journal.previous_entry()? {
             Some(data) => {
+                count += 1;
                 if let Some(ev) = (config.parser)(data, event_type.clone()) {
                     if !ev.raw_msg.contains_bytes(keyword.as_str()) {
                         continue;
@@ -1716,7 +1716,6 @@ pub fn process_previous_logs(
                         error!("Event Dropped!");
                         continue;
                     }
-                    count += 1;
                 }
                 last_cursor = journal.cursor()?;
             }
