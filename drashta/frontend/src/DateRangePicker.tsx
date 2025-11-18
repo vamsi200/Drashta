@@ -52,6 +52,26 @@ export default function DateRangePicker({
     };
   }, [isOpen, onClose]);
 
+  useEffect(() => {
+    if (mode === "absolute" && !startDate && !endDate) {
+      const now = new Date();
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      const formatDateTime = (date: Date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        return `${year}-${month}-${day}T${hours}:${minutes}`;
+      };
+
+      setStartDate(formatDateTime(yesterday));
+      setEndDate(formatDateTime(now));
+    }
+  }, [mode, startDate, endDate]);
+
   if (!isOpen) return null;
 
   const handleQuickSelect = (value: number) => {
@@ -59,14 +79,24 @@ export default function DateRangePicker({
     onClose();
   };
 
-  const handleCustomApply = () => {
-    if (!startDate || !endDate) return;
+  const handleCustomApply = (e: React.MouseEvent) => {
+    e.stopPropagation();
+
+    if (!startDate || !endDate) {
+      alert("Yo select both start and end dates");
+      return;
+    }
 
     const start = new Date(startDate);
     const end = new Date(endDate);
 
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      alert("Invalid date format");
+      return;
+    }
+
     if (start >= end) {
-      alert("Start date must be before end date");
+      alert("Yo Start date must be before end date");
       return;
     }
 
@@ -143,14 +173,18 @@ export default function DateRangePicker({
               <div className="flex-1" />
               <div className={`flex gap-2 pt-3 border-t ${themeClasses.border}`}>
                 <button
-                  onClick={onClose}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onClose();
+                  }}
                   className={`flex-1 px-2 py-1.5 text-xs ${themeClasses.text} border ${themeClasses.border} rounded ${themeClasses.hover} transition`}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleCustomApply}
-                  className={`flex-1 px-2 py-1.5 text-xs ${themeClasses.activeBtn} rounded font-medium hover:opacity-80 transition`}
+                  disabled={!startDate || !endDate}
+                  className={`flex-1 px-2 py-1.5 text-xs ${themeClasses.activeBtn} rounded font-medium hover:opacity-80 transition disabled:opacity-30 disabled:cursor-not-allowed`}
                 >
                   Apply
                 </button>

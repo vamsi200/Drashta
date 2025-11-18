@@ -2,25 +2,379 @@ import { useEffect, useState, useMemo, useRef, useCallback, memo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import LogCountChart from "./chart";
 import DateRangePicker from "./DateRangePicker";
+import PageSizeDropdown from "./PageSizeDropdown";
+
+const EVENT_TYPE_LISTS = {
+  Auth: [
+    "Auth::Success",
+    "Auth::Failure",
+    "Auth::SessionOpened",
+    "Auth::SessionClosed",
+    "Auth::ConnectionClosed",
+    "Auth::TooManyAuthFailures",
+    "Auth::IncorrectPassword",
+    "Auth::AuthError",
+    "Auth::AuthFailure",
+    "Auth::NotInSudoers",
+    "Auth::AccountExpired",
+    "Auth::NologinRefused",
+    "Auth::Warning",
+    "Auth::Info",
+    "Auth::Other"
+  ],
+  User: [
+    "User::NewUser",
+    "User::NewGroup",
+    "User::DeleteGroup",
+    "User::DeleteUser",
+    "User::ModifyUser",
+    "User::ModifyGroup",
+    "User::PasswdChange",
+    "User::Info",
+    "User::Other"
+  ],
+  Package: [
+    "Package::Installed",
+    "Package::Removed",
+    "Package::Upgraded",
+    "Package::Reinstalled",
+    "Package::Downgraded",
+    "Package::Other"
+  ],
+  Network: [
+    "Network::NewConnection",
+    "Network::ConnectionActivated",
+    "Network::ConnectionDeactivated",
+    "Network::DhcpLease",
+    "Network::IpConfig",
+    "Network::DeviceAdded",
+    "Network::DeviceRemoved",
+    "Network::WifiAssociationSuccess",
+    "Network::WifiAuthFailure",
+    "Network::StateChange",
+    "Network::ConnectionAttempt",
+    "Network::PolicyChange",
+    "Network::WifiScan",
+    "Network::DnsConfig",
+    "Network::VpnEvent",
+    "Network::FirewallEvent",
+    "Network::AgentRequest",
+    "Network::ConnectivityCheck",
+    "Network::DispatcherEvent",
+    "Network::LinkEvent",
+    "Network::AuditEvent",
+    "Network::VirtualDeviceEvent",
+    "Network::SystemdEvent",
+    "Network::Warning",
+    "Network::Other",
+    "Network::Error"
+  ],
+  Firewall: [
+    "Firewall::ServiceStarted",
+    "Firewall::ServiceStopped",
+    "Firewall::ConfigReloaded",
+    "Firewall::ZoneChanged",
+    "Firewall::ServiceModified",
+    "Firewall::PortModified",
+    "Firewall::RuleApplied",
+    "Firewall::IptablesCommand",
+    "Firewall::InterfaceBinding",
+    "Firewall::CommandFailed",
+    "Firewall::OperationStatus",
+    "Firewall::ModuleMessage",
+    "Firewall::DBusMessage",
+    "Firewall::Warning",
+    "Firewall::Error",
+    "Firewall::Info",
+    "Firewall::Other"
+  ],
+  Kernel: [
+    "Kernel::Panic",
+    "Kernel::OomKill",
+    "Kernel::Segfault",
+    "Kernel::UsbError",
+    "Kernel::UsbDescriptorError",
+    "Kernel::UsbDeviceEvent",
+    "Kernel::DiskError",
+    "Kernel::FsMount",
+    "Kernel::FsError",
+    "Kernel::CpuError",
+    "Kernel::MemoryError",
+    "Kernel::DeviceDetected",
+    "Kernel::DriverEvent",
+    "Kernel::NetInterface",
+    "Kernel::PciDevice",
+    "Kernel::AcpiEvent",
+    "Kernel::ThermalEvent",
+    "Kernel::DmaError",
+    "Kernel::AuditEvent",
+    "Kernel::KernelTaint",
+    "Kernel::FirmwareLoad",
+    "Kernel::IrqEvent",
+    "Kernel::TaskKilled",
+    "Kernel::RcuStall",
+    "Kernel::Watchdog",
+    "Kernel::BootEvent",
+    "Kernel::Emergency",
+    "Kernel::Alert",
+    "Kernel::Critical",
+    "Kernel::Error",
+    "Kernel::Warning",
+    "Kernel::Notice",
+    "Kernel::Info",
+    "Kernel::Other"
+  ],
+  Config: [
+    "Config::CmdRun",
+    "Config::CronReload",
+    "Config::SessionOpened",
+    "Config::SessionClosed",
+    "Config::Failure",
+    "Config::Info",
+    "Config::Other"
+  ],
+  System: [
+    "System::Info",
+    "System::Warning",
+    "System::Error",
+    "System::Other"
+  ]
+};
+
+const getEventTypesForService = (service: string): string[] => {
+  const serviceMap: Record<string, keyof typeof EVENT_TYPE_LISTS> = {
+    "Sshd": "Auth",
+    "Sudo": "Auth",
+    "Login": "Auth",
+    "Kernel": "Kernel",
+    "ConfigChange": "Config",
+    "PkgManager": "Package",
+    "Firewalld": "Firewall",
+    "NetworkManager": "Network",
+  };
+
+  if (service === "All") {
+    return ["All", ...Object.values(EVENT_TYPE_LISTS).flat()];
+  }
+
+  const eventCategory = serviceMap[service];
+  if (eventCategory) {
+    return ["All", ...EVENT_TYPE_LISTS[eventCategory]];
+  }
+
+  return ["All"];
+};
+
+export type AuthEvent =
+  | "Success"
+  | "Failure"
+  | "SessionOpened"
+  | "SessionClosed"
+  | "ConnectionClosed"
+  | "TooManyAuthFailures"
+  | "IncorrectPassword"
+  | "AuthError"
+  | "AuthFailure"
+  | "NotInSudoers"
+  | "AccountExpired"
+  | "NologinRefused"
+  | "Warning"
+  | "Info"
+  | "Other";
+
+export type UserEvent =
+  | "NewUser"
+  | "NewGroup"
+  | "DeleteGroup"
+  | "DeleteUser"
+  | "ModifyUser"
+  | "ModifyGroup"
+  | "PasswdChange"
+  | "Info"
+  | "Other";
+
+export type PkgEvent =
+  | "Installed"
+  | "Removed"
+  | "Upgraded"
+  | "Reinstalled"
+  | "Downgraded"
+  | "Other";
+
+export type ConfigEvent =
+  | "CmdRun"
+  | "CronReload"
+  | "SessionOpened"
+  | "SessionClosed"
+  | "Failure"
+  | "Info"
+  | "Other";
+
+export type NetEvent =
+  | "NewConnection"
+  | "ConnectionActivated"
+  | "ConnectionDeactivated"
+  | "DhcpLease"
+  | "IpConfig"
+  | "DeviceAdded"
+  | "DeviceRemoved"
+  | "WifiAssociationSuccess"
+  | "WifiAuthFailure"
+  | "StateChange"
+  | "ConnectionAttempt"
+  | "PolicyChange"
+  | "WifiScan"
+  | "DnsConfig"
+  | "VpnEvent"
+  | "FirewallEvent"
+  | "AgentRequest"
+  | "ConnectivityCheck"
+  | "DispatcherEvent"
+  | "LinkEvent"
+  | "AuditEvent"
+  | "VirtualDeviceEvent"
+  | "SystemdEvent"
+  | "Warning"
+  | "Other"
+"Error";
+
+
+export type FirewallEvent =
+  | "ServiceStarted"
+  | "ServiceStopped"
+  | "ConfigReloaded"
+  | "ZoneChanged"
+  | "ServiceModified"
+  | "PortModified"
+  | "RuleApplied"
+  | "IptablesCommand"
+  | "InterfaceBinding"
+  | "CommandFailed"
+  | "OperationStatus"
+  | "ModuleMessage"
+  | "DBusMessage"
+  | "Warning"
+  | "Error"
+  | "Info"
+  | "Other";
+
+export type KernelEvent =
+  | "Panic"
+  | "OomKill"
+  | "Segfault"
+  | "UsbError"
+  | "UsbDescriptorError"
+  | "UsbDeviceEvent"
+  | "DiskError"
+  | "FsMount"
+  | "FsError"
+  | "CpuError"
+  | "MemoryError"
+  | "DeviceDetected"
+  | "DriverEvent"
+  | "NetInterface"
+  | "PciDevice"
+  | "AcpiEvent"
+  | "ThermalEvent"
+  | "DmaError"
+  | "AuditEvent"
+  | "KernelTaint"
+  | "FirmwareLoad"
+  | "IrqEvent"
+  | "TaskKilled"
+  | "RcuStall"
+  | "Watchdog"
+  | "BootEvent"
+  | "Emergency"
+  | "Alert"
+  | "Critical"
+  | "Error"
+  | "Warning"
+  | "Notice"
+  | "Info"
+  | "Other";
+
+export type SystemEvent =
+  | "Info"
+  | "Warning"
+  | "Error"
+  | "Other";
+
+export type EventType =
+  | { Auth: AuthEvent }
+  | { User: UserEvent }
+  | { Package: PkgEvent }
+  | { Network: NetEvent }
+  | { Firewall: FirewallEvent }
+  | { Kernel: KernelEvent }
+  | { Config: ConfigEvent }
+  | { System: SystemEvent };
+
+export type EventData = {
+  timestamp: string;
+  service: string;
+  event_type: EventType;
+  data: Record<string, string>;
+  raw_msg: RawMsg;
+};
+
+const parseEventType = (eventType: EventType): string => {
+  if ("Auth" in eventType) return `Auth::${eventType.Auth}`;
+  if ("User" in eventType) return `User::${eventType.User}`;
+  if ("Package" in eventType) return `Package::${eventType.Package}`;
+  if ("Network" in eventType) return `Network::${eventType.Network}`;
+  if ("Firewall" in eventType) return `Firewall::${eventType.Firewall}`;
+  if ("Kernel" in eventType) return `Kernel::${eventType.Kernel}`;
+  if ("Config" in eventType) return `Config::${eventType.Config}`;
+  if ("System" in eventType) return `System::${eventType.System}`;
+  return "Unknown";
+};
+
+const getEventTypeString = (eventType: EventType): string => {
+  if ("Auth" in eventType) return eventType.Auth;
+  if ("User" in eventType) return eventType.User;
+  if ("Package" in eventType) return eventType.Package;
+  if ("Network" in eventType) return eventType.Network;
+  if ("Firewall" in eventType) return eventType.Firewall;
+  if ("Kernel" in eventType) return eventType.Kernel;
+  if ("Config" in eventType) return eventType.Config;
+  if ("System" in eventType) return eventType.System;
+  return "Unknown";
+};
+
+const getEventCategory = (eventType: EventType): string => {
+  if ("Auth" in eventType) return "Auth";
+  if ("User" in eventType) return "User";
+  if ("Package" in eventType) return "Package";
+  if ("Network" in eventType) return "Network";
+  if ("Firewall" in eventType) return "Firewall";
+  if ("Kernel" in eventType) return "Kernel";
+  if ("Config" in eventType) return "Config";
+  if ("System" in eventType) return "System";
+  return "Unknown";
+};
+
+const eventMatchesTypeFilter = (eventType: EventType, filters: string[]): boolean => {
+  if (filters.length === 0) return true;
+
+  const category = getEventCategory(eventType);
+  const specificType = getEventTypeString(eventType);
+  const fullType = `${category}::${specificType}`;
+
+  return filters.includes(category) ||
+    filters.includes(specificType) ||
+    filters.includes(fullType);
+};
 
 type RawMsg =
   | { type: "Structured"; value: Record<string, string> }
   | { type: "Plain"; value: string };
-
-type EventData = {
-  timestamp: string;
-  service: string;
-  event_type: string;
-  data: Record<string, string>;
-  raw_msg: RawMsg;
-};
 
 type SortDirection = "asc" | "desc" | null;
 type EventSourceType = "drain" | "live";
 export type ThemeType = "emerald" | "white" | "black";
 
 const SERVICES = [
-  "All",
   "Sshd",
   "Sudo",
   "Login",
@@ -103,7 +457,6 @@ export const THEME_CONFIG: Record<ThemeType, {
   },
 };
 
-
 const ServiceDropdown = memo(function ServiceDropdown({
   selectedService,
   onServiceChange,
@@ -176,6 +529,7 @@ const EventTypeDropdown = memo(function EventTypeDropdown({
   onTypeToggle,
   isOpen,
   onToggle,
+  onApply,
   availableTypes,
   theme = 'emerald',
 }: {
@@ -183,6 +537,7 @@ const EventTypeDropdown = memo(function EventTypeDropdown({
   onTypeToggle: (type: string) => void;
   isOpen: boolean;
   onToggle: () => void;
+  onApply: () => void;
   availableTypes: string[];
   theme?: ThemeType;
 }) {
@@ -251,17 +606,29 @@ const EventTypeDropdown = memo(function EventTypeDropdown({
         );
       })}
 
-      {selectedTypes.length > 0 && (
+      <div className={`sticky bottom-0 ${themeClasses.bg} border-t ${themeClasses.border} flex gap-1 p-1`}>
+        {selectedTypes.length > 0 && (
+          <button
+            className={`flex-1 text-center px-2 py-1 text-xs ${themeClasses.accent} ${themeClasses.hover} transition-colors font-mono`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onTypeToggle("All");
+            }}
+          >
+            CLEAR
+          </button>
+        )}
         <button
-          className={`w-full text-left px-2 py-1 text-xs ${themeClasses.accent} ${themeClasses.hover} transition-colors border-t ${themeClasses.border} font-mono`}
+          className={`flex-1 text-center px-2 py-1 text-xs ${themeClasses.activeBtn} transition-colors font-mono`}
           onClick={(e) => {
             e.stopPropagation();
-            onTypeToggle("All");
+            onApply();
+            onToggle();
           }}
         >
-          CLEAR
+          APPLY
         </button>
-      )}
+      </div>
     </div>
   );
 });
@@ -297,7 +664,6 @@ function JsonPart({
           <button
             onClick={onClose}
             className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
-
           >
             ×
           </button>
@@ -319,7 +685,6 @@ function JsonPart({
           <button
             onClick={onClose}
             className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
-
           >
             [EXIT]
           </button>
@@ -388,6 +753,7 @@ const TableLogRow = memo(function TableLogRow({
   theme: ThemeType;
 }) {
   const config = THEME_CONFIG[theme];
+
   const message = useMemo(() => {
     return typeof log.raw_msg === "string"
       ? log.raw_msg
@@ -398,60 +764,69 @@ const TableLogRow = memo(function TableLogRow({
 
   const dataEntries = useMemo(() => Object.entries(log.data), [log.data]);
 
+  const eventTypeDisplay = useMemo(() => parseEventType(log.event_type), [log.event_type]);
+  const eventTypeString = useMemo(() => getEventTypeString(log.event_type), [log.event_type]);
+
   const isError = useMemo(() => {
-    const type = log.event_type.toLowerCase();
-    return type.includes("error") || type.includes("fail") || type.includes("denied");
-  }, [log.event_type]);
+    const type = eventTypeString.toLowerCase();
+    return type.includes("error") || type.includes("fail") || type.includes("denied") || type.includes("incorrect");
+  }, [eventTypeString]);
 
   const isWarning = useMemo(() => {
-    const type = log.event_type.toLowerCase();
+    const type = eventTypeString.toLowerCase();
     return type.includes("warn") || type.includes("attempt");
-  }, [log.event_type]);
+  }, [eventTypeString]);
 
-  const textColor = isError ? "text-red-500" : isWarning ? "text-yellow-500" : config.text;
+  const textColor = isError
+    ? "text-red-500"
+    : isWarning
+      ? "text-yellow-500"
+      : config.text;
 
   return (
-    <>
-      <div
-        onClick={onToggle}
-        className={`cursor-pointer px-3 py-2 transition-colors font-mono text-xs ${textColor} ${isExpanded ? config.logRowHover : config.logRowHover} border-b ${config.logRowBorder}`}
-      >
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex-1 min-w-0">
-            <span className={config.accent}>[{String(log.service).padEnd(12)}]</span>
-            <span className={config.accent}>{" > "}</span>
-            <span className={`${config.accent} opacity-70`}>{log.timestamp}</span>
-            <span className={config.accent}>{" | "}</span>
-            <span className={isError ? "text-red-500" : isWarning ? "text-yellow-500" : "text-cyan-400"}>
-              {log.event_type}
-            </span>
-            <span className={config.accent}>{" >> "}</span>
-            <span className={textColor}>{message.substring(0, 60)}</span>
-            {message.length > 60 && <span className={config.accent}>...</span>}
-          </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onViewJson(log.raw_msg, e);
-            }}
-            className={`ml-4 ${config.accent} hover:${config.text} transition-colors flex-shrink-0 font-mono text-xs whitespace-nowrap`}
-          >
-            [INSPECT]
-          </button>
+    <div
+      onClick={onToggle}
+      className={`cursor-pointer px-4 py-2 transition-colors font-mono text-xs ${textColor} ${isExpanded ? config.logRowHover : config.logRowHover
+        } border-b ${config.logRowBorder}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <span className={config.accent}>[</span>
+          <span className={config.accent}>{String(log.service).padEnd(12)}</span>
+          <span className={config.accent}>]</span>
+          <span className={config.accent}> </span>
+          <span className={`${config.accent} opacity-70`}>{log.timestamp}</span>
+          <span className={config.accent}> </span>
+          <span className={isError ? "text-red-500" : isWarning ? "text-yellow-500" : "text-cyan-400"}>
+            {eventTypeDisplay}
+          </span>
+          <span className={config.accent}> </span>
+          <span className={textColor}>{message.substring(0, 60)}</span>
+          {message.length > 60 && <span className={config.accent}>...</span>}
         </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onViewJson(log.raw_msg, e);
+          }}
+          className={`ml-4 ${config.accent} hover:${config.text} transition-colors flex-shrink-0 font-mono text-xs whitespace-nowrap`}
+        >
+          [INSPECT]
+        </button>
       </div>
 
       {isExpanded && (
-        <div className={`${config.expandedBg} border-b ${config.logRowBorder} border-l-2 pl-3 py-2 px-3 font-mono text-xs ${config.text}`}>
+        <div
+          className={`${config.expandedBg} border-b ${config.logRowBorder} border-l-2 pl-3 py-2 px-3 font-mono text-xs ${config.text}`}
+        >
           <div className={`${config.accent} mb-2`}>
-            <span className={`${config.accent} opacity-60`}>└─</span> EVENT_DETAILS:
+            <span className={`${config.accent} opacity-60`}>─</span> EVENT DETAILS
           </div>
-
           {dataEntries.length > 0 && (
             <div className="ml-2 space-y-1 mb-2">
               {dataEntries.map(([key, value]) => (
                 <div key={key} className={config.text}>
-                  <span className={config.accent}>├─</span>
+                  <span className={config.accent}>→ </span>
                   <span className="text-cyan-400">{key}</span>
                   <span className={config.accent}>: </span>
                   <span className={`${config.text} break-words`}>{value}</span>
@@ -459,10 +834,9 @@ const TableLogRow = memo(function TableLogRow({
               ))}
             </div>
           )}
-
         </div>
       )}
-    </>
+    </div>
   );
 });
 
@@ -470,16 +844,6 @@ export default function Dashboard() {
   const [theme, setTheme] = useState<ThemeType>(() => {
     return (localStorage.getItem('drashta_theme') || "emerald") as ThemeType;
   });
-
-  const [prefetchedNext, setPrefetchedNext] = useState<{
-    logs: EventData[];
-    cursor: string | null;
-  }>({ logs: [], cursor: null });
-
-  const [prefetchedPrev, setPrefetchedPrev] = useState<{
-    logs: EventData[];
-    cursor: string | null;
-  } | null>(null);
 
   const [searchTerm, setSearchTerm] = useState(() => {
     return localStorage.getItem('drashta_searchTerm') || "";
@@ -490,6 +854,7 @@ export default function Dashboard() {
   });
 
   const [drainLogs, setDrainLogs] = useState<EventData[]>([]);
+  const [allDrainLogs, setAllDrainLogs] = useState<EventData[]>([]);
   const [liveLogs, setLiveLogs] = useState<EventData[]>([]);
 
   const [selectedSource, setSelectedSource] = useState<EventSourceType>(() => {
@@ -508,8 +873,22 @@ export default function Dashboard() {
       return [];
     }
   });
+
+  const [appliedType, setAppliedType] = useState<string[]>(() => {
+    const saved = localStorage.getItem('drashta_selectedType');
+    try {
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [isServiceDropdownOpen, setIsServiceDropdownOpen] = useState(false);
-  const [allAvailableTypes, setAllAvailableTypes] = useState<string[]>(["All"]);
+  const [_allAvailableTypes, setAllAvailableTypes] = useState<string[]>(["All"]);
+  const serviceEventTypes = useMemo(() => {
+    return getEventTypesForService(selectedService);
+  }, [selectedService]);
+
   const [currentEventSource, setCurrentEventSource] = useState<EventSource | null>(null);
   const [jsonModal, setJsonPart] = useState<{ isOpen: boolean; rawMsg: RawMsg | null }>({
     isOpen: false,
@@ -520,14 +899,16 @@ export default function Dashboard() {
   const [dateRangeDropdownOpen, setDateRangeDropdownOpen] = useState(false);
 
   const [cursor, setCursor] = useState<string | null>(null);
-  const [pageSize, _setPageSize] = useState<number>(500);
+  const [pageSizeDropdownOpen, setPageSizeDropdownOpen] = useState(false);
+
+  const [pageSize, setPageSize] = useState<number>(1000);
 
   const [currentPage, setCurrentPage] = useState<number>(() => {
     const saved = localStorage.getItem('drashta_currentPage');
     return saved ? parseInt(saved) : 0;
   });
 
-  const [_isFetching, setIsFetching] = useState(false);
+  const [isFetching, setIsFetching] = useState(false);
 
   const [typeDropdownOpen, setEventTypeDropdownOpen] = useState(false);
 
@@ -556,8 +937,9 @@ export default function Dashboard() {
   const [cursorStack, setCursorStack] = useState<string[]>([]);
   const [expandedLogs, setExpandedLogs] = useState<Set<number>>(new Set());
 
-  const eventName = selectedService === "All" ? "all.events" : `${selectedService.toLowerCase()}.events`;
+  const eventName = `${selectedService.toLowerCase()}.events`;
   const currentLogs = selectedSource === "drain" ? drainLogs : liveLogs;
+  const allLogsForAnalytics = selectedSource === "drain" ? allDrainLogs : liveLogs;
 
   useEffect(() => {
     localStorage.setItem('drashta_searchTerm', searchTerm);
@@ -612,7 +994,13 @@ export default function Dashboard() {
 
     for (const key in baseParams) {
       const value = baseParams[key];
-      if (Array.isArray(value)) {
+      if (key === 'event_type' && Array.isArray(value)) {
+        value.forEach(fullType => {
+          const parts = fullType.split('::');
+          const typeOnly = parts.length > 1 ? parts[1] : fullType;
+          params.append('event_type', typeOnly);
+        });
+      } else if (Array.isArray(value)) {
         value.forEach(v => params.append(key, v));
       } else if (value) {
         params.append(key, value);
@@ -627,11 +1015,15 @@ export default function Dashboard() {
   }, [activeQuery]);
 
   useEffect(() => {
-    if (currentLogs.length > 0) {
-      const uniqueTypes = [...new Set(currentLogs.map(log => log.event_type))].sort();
+    if (allLogsForAnalytics.length > 0) {
+      const uniqueTypes = [
+        ...new Set(
+          allLogsForAnalytics.map((log) => parseEventType(log.event_type))
+        ),
+      ].sort();
       setAllAvailableTypes(["All", ...uniqueTypes]);
     }
-  }, [currentLogs]);
+  }, [allLogsForAnalytics]);
 
   useEffect(() => {
     if (selectedSource !== "live") {
@@ -722,13 +1114,13 @@ export default function Dashboard() {
     }
   }, []);
 
-  const fetchInitialDrain = useCallback(async () => {
+  const fetchInitialDrain = useCallback(async (eventTypes?: string[]) => {
     setIsFetching(true);
     try {
       const queryParams = buildQueryParams({
         event_name: eventName,
         limit: pageSize.toString(),
-        event_type: selectedType.length > 0 ? selectedType : undefined,
+        event_type: eventTypes && eventTypes.length > 0 ? eventTypes : undefined,
       });
 
       const res = await fetch(`http://localhost:3200/drain?${queryParams}`);
@@ -753,21 +1145,23 @@ export default function Dashboard() {
       });
 
       setDrainLogs(logs);
+      setAllDrainLogs(logs);
       setCursor(newCursor);
       setCurrentPage(0);
       setCursorStack([]);
-      setPrefetchedNext({ logs: [], cursor: null });
-      setPrefetchedPrev(null);
-
-      if (newCursor) {
-        prefetchNextPage(newCursor);
-      }
     } catch (err) {
       console.error("Error fetching drain:", err);
     } finally {
       setIsFetching(false);
     }
-  }, [eventName, pageSize, buildQueryParams, extractCursor, activeQuery, selectedType]);
+  }, [eventName, pageSize, buildQueryParams, extractCursor]);
+
+  const handlePageSizeChange = useCallback((newSize: number) => {
+    setPageSize(newSize);
+    setCurrentPage(0);
+    setCursorStack([]);
+    fetchInitialDrain(appliedType.length > 0 ? appliedType : undefined);
+  }, [appliedType, fetchInitialDrain]);
 
   const handleSearchSubmit = useCallback(() => {
     const trimmedQuery = searchTerm.trim();
@@ -775,236 +1169,115 @@ export default function Dashboard() {
     if (activeQuery === trimmedQuery) return;
 
     setDrainLogs([]);
+    setAllDrainLogs([]);
     setCursor(null);
     setCurrentPage(0);
     setCursorStack([]);
-    setPrefetchedNext({ logs: [], cursor: null });
-    setPrefetchedPrev(null);
 
     setActiveQuery(trimmedQuery);
   }, [searchTerm, activeQuery]);
 
-  const prefetchPreviousPage = useCallback(
-    async () => {
-      if (cursorStack.length === 0) return;
-      if (currentPage === 1) return;
+  const handlePrevPage = useCallback(async () => {
+    if (cursorStack.length === 0) return;
 
+    if (currentPage === 1) {
+      fetchInitialDrain(appliedType.length > 0 ? appliedType : undefined);
+      return;
+    }
+
+    setIsFetching(true);
+    try {
       const previousCursor = cursorStack[cursorStack.length - 1];
-      if (prefetchedPrev?.cursor === previousCursor) return;
+      const queryParams = buildQueryParams({
+        event_name: eventName,
+        cursor: previousCursor,
+        limit: pageSize.toString(),
+        event_type: appliedType.length > 0 ? appliedType : undefined,
+      });
 
-      try {
-        const queryParams = buildQueryParams({
-          event_name: eventName,
-          cursor: previousCursor,
-          limit: pageSize.toString(),
-          event_type: selectedType.length > 0 ? selectedType : undefined,
+      const res = await fetch(`http://localhost:3200/previous?${queryParams}`);
+      if (!res.ok) throw new Error(`Failed to fetch previous: ${res.status}`);
+      const text = await res.text();
+
+      const logs: EventData[] = [];
+
+      text.split("\n\n").forEach((evt) => {
+        if (!evt.trim()) return;
+        const lines = evt.split("\n");
+        let type = "";
+        let dataLine = "";
+        lines.forEach((line) => {
+          if (line.startsWith("event:")) type = line.replace("event:", "").trim();
+          if (line.startsWith("data:")) dataLine = line.replace("data:", "").trim();
         });
 
-        const res = await fetch(`http://localhost:3200/previous?${queryParams}`);
-        if (!res.ok) return;
-        const text = await res.text();
+        if (type === "log") logs.push(JSON.parse(dataLine));
+      });
 
-        const logs: EventData[] = [];
+      setDrainLogs(logs);
+      const newStack = cursorStack.slice(0, -1);
+      setCursorStack(newStack);
+      setCursor(previousCursor);
+      setCurrentPage((prev) => Math.max(prev - 1, 0));
+    } catch (err) {
+      console.error("Error fetching previous page:", err);
+    } finally {
+      setIsFetching(false);
+    }
+  }, [eventName, pageSize, cursorStack, currentPage, fetchInitialDrain, buildQueryParams, appliedType]);
 
-        text.split("\n\n").forEach((evt) => {
-          if (!evt.trim()) return;
-          const lines = evt.split("\n");
-          let type = "";
-          let dataLine = "";
-          lines.forEach((line) => {
-            if (line.startsWith("event:")) type = line.replace("event:", "").trim();
-            if (line.startsWith("data:")) dataLine = line.replace("data:", "").trim();
-          });
+  const handleNextPage = useCallback(async () => {
+    if (!cursor) return;
 
-          if (type === "log") logs.push(JSON.parse(dataLine));
+    setIsFetching(true);
+    try {
+      const queryParams = buildQueryParams({
+        event_name: eventName,
+        cursor: cursor,
+        limit: pageSize.toString(),
+        event_type: appliedType.length > 0 ? appliedType : undefined,
+      });
+
+      const res = await fetch(`http://localhost:3200/older?${queryParams}`);
+      if (!res.ok) throw new Error(`Failed to fetch older: ${res.status}`);
+      const text = await res.text();
+
+      const logs: EventData[] = [];
+      let newCursor: string | null = null;
+
+      text.split("\n\n").forEach((evt) => {
+        if (!evt.trim()) return;
+        const lines = evt.split("\n");
+        let type = "";
+        let dataLine = "";
+        lines.forEach((line) => {
+          if (line.startsWith("event:")) type = line.replace("event:", "").trim();
+          if (line.startsWith("data:")) dataLine = line.replace("data:", "").trim();
         });
 
-        setPrefetchedPrev({ logs, cursor: previousCursor });
-      } catch (err) {
-        console.error("Error prefetching previous page:", err);
-      }
-    },
-    [eventName, pageSize, cursorStack, currentPage, prefetchedPrev?.cursor, buildQueryParams, selectedType]
-  );
+        if (type === "log") logs.push(JSON.parse(dataLine));
+        if (type === "cursor") newCursor = extractCursor(dataLine);
+      });
 
-  const fetchPreviousPage = useCallback(
-    async () => {
-      if (cursorStack.length === 0) return;
-      setIsFetching(true);
-
-      try {
-        if (currentPage === 1) {
-          await fetchInitialDrain();
-          setIsFetching(false);
-          return;
-        }
-
-        if (prefetchedPrev && prefetchedPrev.logs.length > 0) {
-          setDrainLogs(prefetchedPrev.logs);
-          const newStack = cursorStack.slice(0, -1);
-          setCursorStack(newStack);
-          setCursor(prefetchedPrev.cursor);
-          setCurrentPage((prev) => Math.max(prev - 1, 0));
-          setPrefetchedPrev(null);
-          setIsFetching(false);
-          return;
-        }
-
-        const previousCursor = cursorStack[cursorStack.length - 1];
-        const queryParams = buildQueryParams({
-          event_name: eventName,
-          cursor: previousCursor,
-          limit: pageSize.toString(),
-          event_type: selectedType.length > 0 ? selectedType : undefined,
-        });
-
-        const res = await fetch(`http://localhost:3200/previous?${queryParams}`);
-        if (!res.ok) throw new Error(`Failed to fetch previous: ${res.status}`);
-        const text = await res.text();
-
-        const logs: EventData[] = [];
-
-        text.split("\n\n").forEach((evt) => {
-          if (!evt.trim()) return;
-          const lines = evt.split("\n");
-          let type = "";
-          let dataLine = "";
-          lines.forEach((line) => {
-            if (line.startsWith("event:")) type = line.replace("event:", "").trim();
-            if (line.startsWith("data:")) dataLine = line.replace("data:", "").trim();
-          });
-
-          if (type === "log") logs.push(JSON.parse(dataLine));
-        });
-
-        setDrainLogs(logs);
-        const newStack = cursorStack.slice(0, -1);
-        setCursorStack(newStack);
-        setCursor(previousCursor);
-        setCurrentPage((prev) => Math.max(prev - 1, 0));
-      } catch (err) {
-        console.error("Error fetching previous page:", err);
-      } finally {
-        setIsFetching(false);
-      }
-    },
-    [eventName, pageSize, cursorStack, currentPage, prefetchedPrev, fetchInitialDrain, buildQueryParams, selectedType]
-  );
-
-  const prefetchNextPage = useCallback(
-    async (cursorValue: string) => {
-      if (!cursorValue) return;
-      if (prefetchedNext.cursor === cursorValue) return;
-
-      try {
-        const queryParams = buildQueryParams({
-          event_name: eventName,
-          cursor: cursorValue,
-          limit: pageSize.toString(),
-          event_type: selectedType.length > 0 ? selectedType : undefined,
-        });
-
-        const res = await fetch(`http://localhost:3200/older?${queryParams}`);
-        if (!res.ok) return;
-        const text = await res.text();
-
-        const logs: EventData[] = [];
-        let newCursor: string | null = null;
-
-        text.split("\n\n").forEach((evt) => {
-          if (!evt.trim()) return;
-          const lines = evt.split("\n");
-          let type = "";
-          let dataLine = "";
-          lines.forEach((line) => {
-            if (line.startsWith("event:")) type = line.replace("event:", "").trim();
-            if (line.startsWith("data:")) dataLine = line.replace("data:", "").trim();
-          });
-
-          if (type === "log") logs.push(JSON.parse(dataLine));
-          if (type === "cursor") newCursor = extractCursor(dataLine);
-        });
-
-        setPrefetchedNext({ logs, cursor: newCursor });
-      } catch (err) {
-        console.error("Error prefetching next page:", err);
-      }
-    },
-    [eventName, pageSize, extractCursor, prefetchedNext.cursor, buildQueryParams, selectedType]
-  );
-
-  const fetchOlderPage = useCallback(
-    async (cursorValue: string) => {
-      if (!cursorValue) return;
-      setIsFetching(true);
-
-      try {
-        if (prefetchedNext.logs.length > 0 && prefetchedNext.cursor !== null) {
-          setDrainLogs((prev) => [...prev, ...prefetchedNext.logs]);
-          setCursorStack((prev) => [...prev, cursorValue]);
-          setCursor(prefetchedNext.cursor);
-          setCurrentPage((prev) => prev + 1);
-
-          const nextCursor = prefetchedNext.cursor;
-          setPrefetchedNext({ logs: [], cursor: null });
-
-          if (nextCursor) {
-            prefetchNextPage(nextCursor);
-          }
-
-          setIsFetching(false);
-          return;
-        }
-
-        const queryParams = buildQueryParams({
-          event_name: eventName,
-          cursor: cursorValue,
-          limit: pageSize.toString(),
-          event_type: selectedType.length > 0 ? selectedType : undefined,
-        });
-
-        const res = await fetch(`http://localhost:3200/older?${queryParams}`);
-        if (!res.ok) throw new Error(`Failed to fetch older: ${res.status}`);
-        const text = await res.text();
-
-        const logs: EventData[] = [];
-        let newCursor: string | null = null;
-
-        text.split("\n\n").forEach((evt) => {
-          if (!evt.trim()) return;
-          const lines = evt.split("\n");
-          let type = "";
-          let dataLine = "";
-          lines.forEach((line) => {
-            if (line.startsWith("event:")) type = line.replace("event:", "").trim();
-            if (line.startsWith("data:")) dataLine = line.replace("data:", "").trim();
-          });
-
-          if (type === "log") logs.push(JSON.parse(dataLine));
-          if (type === "cursor") newCursor = extractCursor(dataLine);
-        });
-
-        if (logs.length === 0) {
-          setCursor(null);
-        } else {
-          setDrainLogs((prev) => [...prev, ...logs]);
-          setCursorStack((prev) => [...prev, cursorValue]);
-          setCursor(newCursor);
-          setCurrentPage((prev) => prev + 1);
-
-          if (newCursor) {
-            prefetchNextPage(newCursor);
-          }
-        }
-      } catch (err) {
-        console.error("Error fetching older page:", err);
+      if (newCursor) {
+        setCursor(newCursor);
+        setCursorStack((prev) => [...prev, cursor]);
+        setCurrentPage((prev) => prev + 1);
+      } else {
         setCursor(null);
-      } finally {
-        setIsFetching(false);
       }
-    },
-    [eventName, pageSize, prefetchedNext, extractCursor, prefetchNextPage, buildQueryParams, selectedType]
-  );
+
+      setDrainLogs(logs);
+      if (logs.length > 0) {
+        setAllDrainLogs((prev) => [...prev, ...logs]);
+      }
+    } catch (err) {
+      console.error("Error fetching older page:", err);
+      setCursor(null);
+    } finally {
+      setIsFetching(false);
+    }
+  }, [cursor, eventName, pageSize, extractCursor, buildQueryParams, appliedType]);
 
   const handleGlobalKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.target === searchInputRef.current || e.ctrlKey || e.altKey || e.metaKey) {
@@ -1027,7 +1300,9 @@ export default function Dashboard() {
 
   const toggleTypeSelection = useCallback((type: string) => {
     setSelectedType(prev => {
-      if (type === "All") return [];
+      if (type === "All") {
+        return [];
+      }
 
       if (prev.includes(type)) {
         return prev.filter(t => t !== type);
@@ -1035,6 +1310,14 @@ export default function Dashboard() {
       return [...prev, type];
     });
   }, []);
+
+  const applyTypeFilter = useCallback(async () => {
+    setAppliedType(selectedType);
+
+    if (currentPage === 0) {
+      fetchInitialDrain(selectedType.length > 0 ? selectedType : undefined);
+    }
+  }, [selectedType, currentPage, fetchInitialDrain]);
 
   const toggleTimestampSort = useCallback(() => {
     setSortDirection(prev => {
@@ -1044,20 +1327,11 @@ export default function Dashboard() {
     });
   }, []);
 
-  const handleNextPage = useCallback(() => {
-    if (!cursor) return;
-    fetchOlderPage(cursor);
-  }, [cursor, fetchOlderPage]);
-
-  const handlePrevPage = useCallback(() => {
-    fetchPreviousPage();
-  }, [fetchPreviousPage]);
-
   useEffect(() => {
     if (selectedSource === "drain") {
       fetchInitialDrain();
     }
-  }, [selectedSource, activeQuery, selectedService, selectedType, fetchInitialDrain]);
+  }, [selectedSource, activeQuery, selectedService, fetchInitialDrain]);
 
   useEffect(() => {
     if (selectedSource === "live") {
@@ -1069,7 +1343,7 @@ export default function Dashboard() {
     let startTime: number;
     let endTime: number = Date.now();
 
-    if (dateRangeMode === 'absolute' && absoluteDateRange) {
+    if (dateRangeMode === "absolute" && absoluteDateRange) {
       startTime = absoluteDateRange.start.getTime();
       endTime = absoluteDateRange.end.getTime();
     } else {
@@ -1078,13 +1352,12 @@ export default function Dashboard() {
     }
 
     let filtered = currentLogs.filter((log, index) => {
-      if (selectedService !== "All" &&
-        log.service.toLowerCase() !== selectedService.toLowerCase()) {
+      if (selectedService !== "All" && log.service.toLowerCase() !== selectedService.toLowerCase()) {
         return false;
       }
 
-      if (selectedSource === "live" && selectedType.length > 0) {
-        if (!selectedType.includes(log.event_type)) {
+      if (currentPage > 0 && appliedType.length > 0) {
+        if (!eventMatchesTypeFilter(log.event_type, appliedType)) {
           return false;
         }
       }
@@ -1093,7 +1366,6 @@ export default function Dashboard() {
       if (logTime !== 0 && (logTime < startTime || logTime > endTime)) {
         return false;
       }
-
       return true;
     });
 
@@ -1109,13 +1381,21 @@ export default function Dashboard() {
             ? a.timestamp.localeCompare(b.timestamp)
             : b.timestamp.localeCompare(a.timestamp);
         }
-
         return sortDirection === "asc" ? timeA - timeB : timeB - timeA;
       });
     }
 
     return filtered;
-  }, [currentLogs, selectedService, selectedType, selectedSource, sortDirection, selectedTimeRange, dateRangeMode, absoluteDateRange]);
+  }, [
+    currentLogs,
+    selectedService,
+    appliedType,
+    currentPage,
+    sortDirection,
+    selectedTimeRange,
+    dateRangeMode,
+    absoluteDateRange,
+  ]);
 
   const handleSourceChange = (source: EventSourceType) => {
     if (currentEventSource) {
@@ -1124,11 +1404,13 @@ export default function Dashboard() {
     }
     setSelectedSource(source);
     setSelectedType([]);
+    setAppliedType([]);
   };
 
   const handleRefresh = useCallback(() => {
     if (selectedSource === "drain") {
       setDrainLogs([]);
+      setAllDrainLogs([]);
       fetchInitialDrain();
     } else {
       setLiveLogs([]);
@@ -1247,16 +1529,16 @@ export default function Dashboard() {
               <button
                 onClick={() => setEventTypeDropdownOpen(!typeDropdownOpen)}
                 className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
-
               >
-                [TYPES]
+                [TYPES{selectedType.length > 0 ? `: ${selectedType.length}` : ''}]
               </button>
               <EventTypeDropdown
                 selectedTypes={selectedType}
                 onTypeToggle={toggleTypeSelection}
                 isOpen={typeDropdownOpen}
                 onToggle={() => setEventTypeDropdownOpen(false)}
-                availableTypes={allAvailableTypes}
+                onApply={applyTypeFilter}
+                availableTypes={serviceEventTypes}
                 theme={theme}
               />
             </div>
@@ -1280,27 +1562,23 @@ export default function Dashboard() {
             <button
               onClick={toggleTimestampSort}
               className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
-
             >
               [SORT]
             </button>
             <div className={`flex border ${config.border} rounded overflow-hidden`}>
               <button
                 onClick={() => handleSourceChange("drain")}
-                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono ${selectedSource === "drain" ? "font-bold" : "font-normal"
-                  }`}
+                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono ${selectedSource === "drain" ? "font-bold" : "font-normal"}`}
               >
                 DRAIN
               </button>
               <button
                 onClick={() => handleSourceChange("live")}
-                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono ${selectedSource === "live" ? "font-bold" : "font-normal"
-                  }`}
+                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono ${selectedSource === "live" ? "font-bold" : "font-normal"}`}
               >
                 LIVE
               </button>
             </div>
-
 
             <button
               onClick={handleRefresh}
@@ -1312,7 +1590,6 @@ export default function Dashboard() {
             <button
               onClick={() => setShowAnalytics(!showAnalytics)}
               className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
-
             >
               [CHART]
             </button>
@@ -1321,7 +1598,6 @@ export default function Dashboard() {
               <button
                 onClick={() => setThemeDropdownOpen(!themeDropdownOpen)}
                 className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
-
               >
                 [THEME]
               </button>
@@ -1362,31 +1638,45 @@ export default function Dashboard() {
       </div>
 
       {showAnalytics && (
-        <div className={`h-100 p-4 bg-opacity-50 overflow-auto`}>
-          <LogCountChart logs={filteredAndSortedLogs} timeRange={selectedTimeRange} theme={theme} />
+        <div className={`h-100 p-2 bg-opacity-50 overflow-auto`}>
+          <LogCountChart logs={allLogsForAnalytics} timeRange={selectedTimeRange} theme={theme} />
         </div>
       )}
+
       <div className={`flex-1 flex flex-col overflow-hidden ${config.bg} relative`}>
         <div className={`flex-1 flex flex-col overflow-hidden border ${config.border} rounded-lg m-2 ${config.logRowBg}`}>
-          {selectedSource === "drain" && filteredAndSortedLogs.length > 0 && (
+          {selectedSource === "drain" && (
             <div className={`px-3 py-4 flex justify-between items-center -mt-2`}>
-
               <span className={`text-xs font-mono ${config.accent}`}>
-                Page {currentPage + 1} • {filteredAndSortedLogs.length} entries
+                Page {currentPage + 1} • {filteredAndSortedLogs.length} entries • {allDrainLogs.length} total
               </span>
               <div className="flex items-center gap-2">
+                <div className="relative">
+                  <button
+                    onClick={() => setPageSizeDropdownOpen(!pageSizeDropdownOpen)}
+                    className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+                  >
+                    {pageSize}
+                  </button>
+                  <PageSizeDropdown
+                    selectedSize={pageSize}
+                    onSizeChange={handlePageSizeChange}
+                    isOpen={pageSizeDropdownOpen}
+                    onToggle={() => setPageSizeDropdownOpen(false)}
+                    theme={theme}
+                  />
+                </div>
+
                 <button
-                  onMouseEnter={prefetchPreviousPage}
                   onClick={handlePrevPage}
-                  disabled={currentPage === 0}
+                  disabled={currentPage === 0 || isFetching}
                   className={`px-2 py-0.5 border ${config.border} rounded hover:opacity-80 disabled:opacity-30 transition-colors ${config.text} text-xs font-mono`}
                 >
                   PREV
                 </button>
                 <button
-                  onMouseEnter={() => cursor && prefetchNextPage(cursor)}
                   onClick={handleNextPage}
-                  disabled={!cursor}
+                  disabled={!cursor || isFetching || filteredAndSortedLogs.length < pageSize}
                   className={`px-2 py-0.5 rounded hover:opacity-80 disabled:opacity-30 transition-colors font-bold ${config.activeBtn} text-xs font-mono`}
                 >
                   NEXT
@@ -1398,9 +1688,36 @@ export default function Dashboard() {
           <div ref={parentRef} className={`flex-1 overflow-y-auto ${config.bg}`}>
             {filteredAndSortedLogs.length === 0 ? (
               <div className="flex items-center justify-center h-full">
-                <div className={`${config.accent} text-xs space-y-1 font-mono`}>
-                  <div>$ no_logs_found --search</div>
-                  <div className="opacity-50">✗ No results matching your query</div>
+                <div className={`${config.accent} text-xs space-y-3 font-mono text-center`}>
+                  {appliedType.length > 0 ? (
+                    <>
+                      <div className="space-y-1">
+                        <div className={`${config.text} text-sm`}>
+                          $ no_matches_on_page_{currentPage + 1}
+                        </div>
+                        <div className="opacity-70">
+                          ✗ No logs found for selected event types on this page
+                        </div>
+                        <div className={`opacity-50 text-xs ${config.accent}`}>
+                          Active filters: {appliedType.join(", ")}
+                        </div>
+                      </div>
+                      {cursor && (
+                        <div className={`${config.accent} opacity-50 text-xs pt-2`}>
+                          Use NEXT to continue searching through journal
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div>$ no_logs_found</div>
+                      <div className="opacity-50">
+                        {!cursor
+                          ? "No more logs available"
+                          : "No results on this page"}
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             ) : (
@@ -1440,7 +1757,6 @@ export default function Dashboard() {
         </div>
       </div>
       <JsonPart isOpen={jsonModal.isOpen} onClose={closeJsonPart} rawMsg={jsonModal.rawMsg} theme={theme} />
-
     </div>
   );
 }
