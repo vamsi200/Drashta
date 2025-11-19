@@ -19,41 +19,6 @@ use std::vec;
 pub async fn main() -> Result<()> {
     env_logger::init();
     let (tx, _) = tokio::sync::broadcast::channel::<EventData>(1024);
-    // let mut data = AHashMap::new();
-    // data.insert(
-    //     "MESSAGE".to_string(),
-    //     "Accepted password for vamsi from 127.0.0.1 port 55452 ssh2".to_owned(),
-    // );
-    //
-    // let ev = EventData {
-    //     timestamp: "Sep 14 01:06:18".to_owned(),
-    //     service: parser::Service::Sshd,
-    //     event_type: EventType::Success,
-    //     data,
-    //     raw_msg: RawMsgType::Plain(
-    //         "Accepted password for vamsi from 127.0.0.1 port 55452 ssh2".to_owned(),
-    //     ),
-    // };
-    // search_logs(ev, "Accepted")?;
-    // let new_cursor: Cursor = Cursor {
-    //     timestamp: "2025-06-10T13:45:56+0530".to_string(),
-    //     data: "[2025-06-10T13:45:56+0530] [ALPM] upgraded pacman-mirrorlist (20250101-1 -> 20250522-1)".to_owned(),
-    //     offset: 40000,
-    // };
     let _ = render_app(tx).await;
-    // let cursor = manual_parse(tx, "pkgmanager.events", 100)?;
-    // info!("Cursor : {:?}", cursor);
-    // process_manual_events_previous(tx, "pkgmanager.events", new_cursor, 30000)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn check_sshd() {
-        let unit = vec!["sshd.service"];
-        let (tx, _) = tokio::sync::broadcast::channel::<Entry>(1024);
-    }
 }

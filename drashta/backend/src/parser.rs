@@ -19,7 +19,6 @@ use std::{
 };
 
 use ahash::AHashMap;
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder, Input, Match, automaton::Automaton, dfa::DFA};
 use anyhow::Result;
 use axum::extract::State;
 use chrono::{DateTime, Local, TimeZone};
@@ -27,6 +26,8 @@ use futures::future::Either;
 use log::{error, info, warn};
 use memchr::memmem;
 use once_cell::sync::Lazy;
+
+use rayon::prelude::*;
 use regex::Regex;
 use serde::{
     Deserialize, Serialize,
@@ -52,14 +53,13 @@ pub enum RawMsgType {
 
 impl RawMsgType {
     fn contains_bytes(&self, pat: &str) -> bool {
-        let ac = AhoCorasickBuilder::new()
-            .ascii_case_insensitive(true)
-            .build([pat])
-            .unwrap();
+        let pat_lower = pat.to_lowercase();
 
         match self {
-            RawMsgType::Structured(map) => map.values().any(|v| ac.is_match(v)),
-            RawMsgType::Plain(s) => ac.is_match(s),
+            RawMsgType::Structured(map) => {
+                map.values().any(|v| v.to_lowercase().contains(&pat_lower))
+            }
+            RawMsgType::Plain(s) => s.to_lowercase().contains(&pat_lower),
         }
     }
 }
@@ -1399,7 +1399,6 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
     }
     None
 }
-
 pub fn parse_firewalld_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     let msg = entry_map.get("MESSAGE")?;
     let timestamp = entry_map
@@ -1587,12 +1586,34 @@ pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
     map
 }
 
+pub fn process_entries_in_parallel(
+    data: VecDeque<Entry>,
+    opts: &ParserFuncArgs,
+    config: &ServiceConfig,
+) -> Result<(), anyhow::Error> {
+    let filter = &opts.filter;
+    let tx = &opts.tx;
+    let event_type = &opts.ev_type;
+
+    data.par_iter().for_each(|val| {
+        if let Some(ev) = (config.parser)(val.clone(), event_type.clone()) {
+            if let Some(filter_val) = filter {
+                if !ev.raw_msg.contains_bytes(filter_val) {
+                    return;
+                }
+            }
+
+            let _ = tx.try_send(ev);
+        }
+    });
+
+    Ok(())
+}
+
 pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> Result<String> {
-    let filter = opts.filter.unwrap_or_default();
     let limit = opts.limit;
-    let tx = opts.tx;
     let mut journal = opts.journal.lock().unwrap();
-    let event_type = opts.ev_type;
+    let mut batch = VecDeque::with_capacity(100);
 
     for (field, value) in &config.matches {
         journal.match_add(field, value.to_string())?;
@@ -1600,23 +1621,24 @@ pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> R
     }
 
     journal.seek_head()?;
+
     let mut count = 0;
-    let max_scan = limit * 10;
     while count < limit {
         if let Some(data) = journal.next_entry()? {
-            if let Some(ev) = (config.parser)(data, event_type.clone()) {
-                if !ev.raw_msg.contains_bytes(&filter) {
-                    continue;
-                }
+            count += 1;
+            batch.push_back(data);
 
-                if tx.try_send(ev).is_err() {
-                    continue;
-                }
-                count += 1;
+            if batch.len() >= 100 {
+                let current_batch = std::mem::replace(&mut batch, VecDeque::with_capacity(100));
+                process_entries_in_parallel(current_batch, &opts, config)?;
             }
         } else {
             break;
         }
+    }
+
+    if !batch.is_empty() {
+        process_entries_in_parallel(batch, &opts, config)?;
     }
 
     let cursor = journal.cursor()?;
@@ -1628,16 +1650,9 @@ pub fn process_older_logs(
     config: &ServiceConfig,
     cursor: String,
 ) -> Result<String> {
-    let filter = opts.filter;
     let limit = opts.limit;
-    let tx = opts.tx;
     let mut journal = opts.journal.lock().unwrap();
-    let event_type = opts.ev_type;
-
-    let mut keyword = String::new();
-    if let Some(filter) = filter {
-        keyword = filter;
-    }
+    let mut batch = VecDeque::with_capacity(100);
 
     for (i, (field, value)) in config.matches.iter().enumerate() {
         journal.match_add(field, value.to_string())?;
@@ -1654,16 +1669,11 @@ pub fn process_older_logs(
         match journal.next_entry()? {
             Some(data) => {
                 count += 1;
+                batch.push_back(data);
 
-                if let Some(ev) = (config.parser)(data, event_type.clone()) {
-                    if !ev.raw_msg.contains_bytes(keyword.as_str()) {
-                        continue;
-                    }
-
-                    if tx.blocking_send(ev).is_err() {
-                        error!("Event Dropped!");
-                        continue;
-                    }
+                if batch.len() >= 100 {
+                    let current_batch = std::mem::replace(&mut batch, VecDeque::with_capacity(100));
+                    process_entries_in_parallel(current_batch, &opts, config)?;
                 }
 
                 last_cursor = journal.cursor()?;
@@ -1674,7 +1684,9 @@ pub fn process_older_logs(
             }
         }
     }
-
+    if !batch.is_empty() {
+        process_entries_in_parallel(batch, &opts, config)?;
+    }
     Ok(last_cursor)
 }
 
