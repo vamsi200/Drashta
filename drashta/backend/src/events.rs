@@ -2,17 +2,6 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use std::{
-    collections::{BTreeMap, VecDeque},
-    convert::Infallible,
-    io::{BufWriter, Write},
-    mem::size_of_val,
-    process::exit,
-    sync::{Arc, Mutex},
-    thread::{sleep, spawn},
-    time::Duration,
-};
-
 use anyhow::Result;
 use axum::{
     Router,
@@ -23,8 +12,20 @@ use axum::{
 use axum_extra::extract::Query;
 use futures::{Stream, StreamExt, stream};
 use log::{Level, debug, error, info, log_enabled};
+use rayon::iter::IntoParallelRefIterator;
+use rayon::prelude::*;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, to_string};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    convert::Infallible,
+    io::{BufWriter, Write},
+    mem::size_of_val,
+    process::exit,
+    sync::{Arc, Mutex},
+    thread::{sleep, spawn},
+    time::Duration,
+};
 use tokio::{
     sync::{
         broadcast::{self, Sender},
@@ -107,14 +108,38 @@ pub async fn drain_older_logs(
     });
 
     let new_cursor = handle.await.unwrap();
-
+    let mut batch = VecDeque::with_capacity(100);
+    let parallel_required_bro = limit >= 1000;
     let stream = async_stream::stream! {
         let cursor_json = json!({ "cursor": new_cursor }).to_string();
         yield Ok(Event::default().event("cursor").data(cursor_json));
-        while let Some(msg) = rx.recv().await {
-            let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
-            yield Ok(Event::default().event("log").data(json));
 
+        while let Some(msg) = rx.recv().await {
+            batch.push_back(msg);
+
+            if batch.len() >= 100 {
+                if parallel_required_bro {
+                    let logs: Vec<_> = batch
+                        .par_iter()
+                        .map(|x| {
+                            let json = serde_json::to_string(x).unwrap_or("{}".to_string());
+                            Event::default().event("log").data(json)
+                        })
+                        .collect();
+
+                    batch.clear();
+
+                    for event in logs {
+                        yield Ok(event);
+                    }
+
+                } else {
+                    for x in batch.drain(..) {
+                        let json = serde_json::to_string(&x).unwrap_or("{}".to_string());
+                        yield Ok(Event::default().event("log").data(json));
+                    }
+                }
+            }
         }
     };
 
@@ -124,7 +149,7 @@ pub async fn drain_older_logs(
 pub async fn drain_upto_n_entries(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    let (tx, mut rx) = mpsc::channel::<EventData>(1024);
+    let (tx, mut rx) = mpsc::channel::<EventData>(102400);
     let mut journal_units = Journalunits::new();
 
     match &filter_event.0.event_name {
@@ -167,6 +192,9 @@ pub async fn drain_upto_n_entries(
     });
 
     let cursor = handle.join().unwrap();
+    let mut batch = VecDeque::with_capacity(100);
+    let parallel_required_bro = limit >= 1000;
+
     let stream = async_stream::stream! {
         if let Some(cursor) = cursor {
             let cursor_json = json!({ "cursor": cursor }).to_string();
@@ -174,8 +202,26 @@ pub async fn drain_upto_n_entries(
         }
 
         while let Some(msg) = rx.recv().await {
-            let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
-            yield Ok(Event::default().event("log").data(json));
+            batch.push_back(msg);
+
+            if parallel_required_bro{
+                let logs: Vec<_> = batch.par_iter().map(|x|{
+                    let json = serde_json::to_string(x).unwrap_or("{}".to_string());
+                    Event::default().event("log").data(json)
+                }).collect();
+
+                batch.clear();
+                for event in logs{
+                    yield Ok(event);
+                }
+
+            } else {
+                for x in batch.drain(..){
+                    let json = serde_json::to_string(&x).unwrap_or("{}".to_string());
+                    yield Ok(Event::default().event("log").data(json));
+
+                }
+            }
         }
     };
 
@@ -185,7 +231,7 @@ pub async fn drain_upto_n_entries(
 pub async fn drain_previous_logs(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    let (tx, mut rx) = mpsc::channel::<EventData>(1024);
+    let (tx, mut rx) = mpsc::channel::<EventData>(102400);
     let mut journal_units = Journalunits::new();
 
     match filter_event.0.event_name {
@@ -230,13 +276,31 @@ pub async fn drain_previous_logs(
     });
 
     let new_cursor = handle.await.unwrap();
+    let mut batch = VecDeque::with_capacity(100);
+    let parallel_required_bro = limit >= 1000;
 
     let stream = async_stream::stream! {
         let cursor_json = json!({ "cursor": new_cursor }).to_string();
         yield Ok(Event::default().event("cursor").data(cursor_json));
         while let Some(msg) = rx.recv().await {
-            let json = to_string(&msg).unwrap_or_else(|_| "{}".to_string());
-            yield Ok(Event::default().event("log").data(json));
+            batch.push_back(msg);
+            if parallel_required_bro{
+                let logs: Vec<_> = batch.par_iter().map(|x|{
+                    let json = serde_json::to_string(x).unwrap_or("{}".to_string());
+                    Event::default().event("log").data(json)
+                }).collect();
+
+                batch.clear();
+                for event in logs{
+                    yield Ok(event);
+                }
+
+            } else {
+                for event in batch.drain(..){
+                    let json = to_string(&event).unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(Event::default().event("log").data(json));
+                }
+            }
 
         }
     };
