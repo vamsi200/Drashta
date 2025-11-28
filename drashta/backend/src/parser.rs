@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
     fs::File,
-    io::{BufRead, BufReader, Read, Seek},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     os::fd::{AsRawFd, BorrowedFd},
     path::PathBuf,
     rc::Rc,
@@ -20,9 +20,11 @@ use std::{
 
 use ahash::AHashMap;
 use anyhow::Result;
+use anyhow::anyhow;
 use axum::extract::State;
 use chrono::{DateTime, Local, TimeZone};
 use futures::future::Either;
+use inotify::{Inotify, WatchMask};
 use log::{error, info, warn};
 use memchr::memmem;
 use once_cell::sync::Lazy;
@@ -262,11 +264,17 @@ pub enum EventType {
     System(SystemEvent),
 }
 
-type ParserFn = fn(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData>;
+pub type ParserFn = fn(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData>;
+pub type ParserFnForManual = fn(entry_map: String, ev_type: Option<Vec<&str>>) -> Option<EventData>;
+
+pub enum ParserFunctionType {
+    ParserFn(ParserFn),
+    ParserFnForManual(ParserFnForManual),
+}
 
 pub struct ServiceConfig {
-    matches: Vec<(&'static str, &'static str)>,
-    parser: ParserFn,
+    matches: Option<Vec<(&'static str, &'static str)>>,
+    parser: ParserFunctionType,
 }
 
 #[derive(Clone)]
@@ -1509,77 +1517,83 @@ pub fn parse_firewalld_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> O
 
 pub fn get_service_configs() -> AHashMap<&'static str, ServiceConfig> {
     let mut map = AHashMap::new();
+    map.insert(
+        "pkgmanager.events",
+        ServiceConfig {
+            matches: None,
+            parser: ParserFunctionType::ParserFnForManual(parse_pkg_events),
+        },
+    );
 
     map.insert(
         "sshd.events",
         ServiceConfig {
-            matches: vec![
+            matches: Some(vec![
                 ("_COMM", "sshd"),
                 ("_EXE", "/usr/sbin/sshd"),
                 ("_SYSTEMD_UNIT", "sshd.service"),
-            ],
-            parser: parse_sshd_logs,
+            ]),
+            parser: ParserFunctionType::ParserFn(parse_sshd_logs),
         },
     );
 
     map.insert(
         "sudo.events",
         ServiceConfig {
-            matches: vec![("_COMM", "su"), ("_COMM", "sudo")],
-            parser: parse_sudo_login_attempts,
+            matches: Some(vec![("_COMM", "su"), ("_COMM", "sudo")]),
+            parser: ParserFunctionType::ParserFn(parse_sudo_login_attempts),
         },
     );
 
     map.insert(
         "login.events",
         ServiceConfig {
-            matches: vec![("SYSLOG_IDENTIFIER", "systemd-logind")],
-
-            parser: parse_login_attempts,
+            matches: Some(vec![("SYSLOG_IDENTIFIER", "systemd-logind")]),
+            parser: ParserFunctionType::ParserFn(parse_login_attempts),
         },
     );
 
     map.insert(
         "firewalld.events",
         ServiceConfig {
-            matches: vec![("_SYSTEMD_UNIT", "firewalld.service")],
-            parser: parse_firewalld_events,
+            matches: Some(vec![("_SYSTEMD_UNIT", "firewalld.service")]),
+            parser: ParserFunctionType::ParserFn(parse_firewalld_events),
         },
     );
 
     map.insert(
         "networkmanager.events",
         ServiceConfig {
-            matches: vec![("_SYSTEMD_UNIT", "NetworkManager.service")],
-            parser: parse_network_events,
+            matches: Some(vec![("_SYSTEMD_UNIT", "NetworkManager.service")]),
+            parser: ParserFunctionType::ParserFn(parse_network_events),
         },
     );
 
     map.insert(
         "kernel.events",
         ServiceConfig {
-            matches: vec![("_TRANSPORT", "kernel")],
-            parser: parse_kernel_events,
+            matches: Some(vec![("_TRANSPORT", "kernel")]),
+            parser: ParserFunctionType::ParserFn(parse_kernel_events),
         },
     );
 
     map.insert(
         "userchange.events",
         ServiceConfig {
-            matches: vec![
+            matches: Some(vec![
                 ("_COMM", "useradd"),
                 ("_COMM", "groupadd"),
                 ("_COMM", "passwd"),
-            ],
-            parser: parse_user_change_events,
+            ]),
+            parser: ParserFunctionType::ParserFn(parse_user_change_events),
         },
     );
 
     map.insert(
         "configchange.events",
         ServiceConfig {
-            matches: vec![("_SYSTEMD_UNIT", "cronie.service")],
-            parser: parse_config_change_events,
+            matches: Some(vec![("_SYSTEMD_UNIT", "cronie.service")]),
+            parser: ParserFunctionType::ParserFn(parse_config_change_events),
         },
     );
 
@@ -1594,9 +1608,12 @@ pub fn process_entries_in_parallel(
     let filter = &opts.filter;
     let tx = &opts.tx;
     let event_type = &opts.ev_type;
+    let ParserFunctionType::ParserFn(parserfn) = config.parser else {
+        return Err(anyhow!("ParserFn required here"));
+    };
 
     data.par_iter().for_each(|val| {
-        if let Some(ev) = (config.parser)(val.clone(), event_type.clone()) {
+        if let Some(ev) = parserfn(val.clone(), event_type.clone()) {
             if let Some(filter_val) = filter {
                 if !ev.raw_msg.contains_bytes(filter_val) {
                     return;
@@ -1615,9 +1632,11 @@ pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> R
     let mut journal = opts.journal.lock().unwrap();
     let mut batch = VecDeque::with_capacity(100);
 
-    for (field, value) in &config.matches {
-        journal.match_add(field, value.to_string())?;
-        journal.match_or()?;
+    if let Some(values) = &config.matches {
+        for (field, value) in values {
+            journal.match_add(field, value.to_string())?;
+            journal.match_or()?;
+        }
     }
 
     journal.seek_head()?;
@@ -1654,9 +1673,9 @@ pub fn process_older_logs(
     let mut journal = opts.journal.lock().unwrap();
     let mut batch = VecDeque::with_capacity(100);
 
-    for (i, (field, value)) in config.matches.iter().enumerate() {
-        journal.match_add(field, value.to_string())?;
-        if i < config.matches.len() - 1 {
+    if let Some(values) = &config.matches {
+        for (field, value) in values {
+            journal.match_add(field, value.to_string())?;
             journal.match_or()?;
         }
     }
@@ -1705,9 +1724,13 @@ pub fn process_previous_logs(
     if let Some(filter) = filter {
         keyword = filter;
     }
-    for (i, (field, value)) in config.matches.iter().enumerate() {
-        journal.match_add(field, value.to_string())?;
-        if i < config.matches.len() - 1 {
+    let ParserFunctionType::ParserFn(parserfn) = config.parser else {
+        return Err(anyhow!("ParserFn required here"));
+    };
+
+    if let Some(values) = &config.matches {
+        for (field, value) in values {
+            journal.match_add(field, value.to_string())?;
             journal.match_or()?;
         }
     }
@@ -1720,7 +1743,7 @@ pub fn process_previous_logs(
         match journal.previous_entry()? {
             Some(data) => {
                 count += 1;
-                if let Some(ev) = (config.parser)(data, event_type.clone()) {
+                if let Some(ev) = parserfn(data, event_type.clone()) {
                     if !ev.raw_msg.contains_bytes(keyword.as_str()) {
                         continue;
                     }
@@ -1791,6 +1814,7 @@ pub fn process_manual_events_upto_n(opts: ParserFuncArgs) -> Result<Option<Curso
         let mut count = 0;
         let mut buf = String::new();
         let mut line_count = 0;
+
         while reader.read_line(&mut buf).unwrap() > 0 && count < limit {
             let offset = reader.stream_position()?;
             line_count += 1;
@@ -2119,6 +2143,79 @@ pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> 
 
 const MAX_FAILED_EVENTS: usize = 5_000;
 
+pub fn read_journal_logs_manual(
+    service_name: &str,
+    filter: Option<String>,
+    ev_type: Option<Vec<&str>>,
+    tx: tokio::sync::broadcast::Sender<EventData>,
+) -> anyhow::Result<()> {
+    let configs = get_service_configs();
+    // let mut failed_ev_buf = VecDeque::with_capacity(MAX_FAILED_EVENTS);
+
+    let Some(config) = configs.get(service_name) else {
+        anyhow::bail!("Unknown Service: {}", service_name);
+    };
+
+    let ParserFunctionType::ParserFnForManual(parserfn) = config.parser else {
+        return Err(anyhow!("ParserFnForManual required here"));
+    };
+
+    let keyword = filter.unwrap_or_default();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_micros() as u64;
+
+    let mut file = File::open("/var/log/pacman.log")?;
+    let mut inotify = Inotify::init()?;
+    inotify.watches().add(
+        "/var/log/pacman.log",
+        WatchMask::MODIFY | WatchMask::MOVE_SELF | WatchMask::DELETE_SELF | WatchMask::CREATE,
+    )?;
+
+    let mut buffer = [0u8; 4096];
+    let mut last_pos = file.seek(SeekFrom::End(0))?;
+    if service_name == "pkgmanager.events" {
+        loop {
+            let events = inotify.read_events_blocking(&mut buffer)?;
+            for _ev in events {
+                let new_len = file.metadata()?.len();
+
+                if new_len < last_pos {
+                    file = File::open("/var/log/pacman.log")?;
+                    last_pos = 0;
+                }
+
+                if new_len > last_pos {
+                    let read_len = new_len - last_pos;
+
+                    file.seek(SeekFrom::Start(last_pos))?;
+                    let mut buf = Vec::with_capacity(8192);
+                    buf.resize(read_len as usize, 0);
+
+                    file.read_exact(&mut buf)?;
+
+                    let log_line = String::from_utf8_lossy(&buf);
+
+                    for line in log_line.lines() {
+                        if let Some(ev) = parse_pkg_events(line.to_string(), ev_type.clone()) {
+                            if ev.raw_msg.contains_bytes(keyword.as_str()) {
+                                if tx.send(ev.clone()).is_err() {
+                                    error!("No active receiver!!");
+                                }
+                            }
+                        }
+                    }
+
+                    last_pos = new_len;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn read_journal_logs(
     service_name: &str,
     filter: Option<String>,
@@ -2135,9 +2232,16 @@ pub fn read_journal_logs(
     let mut journal: Journal = journal::OpenOptions::default()
         .all_namespaces(true)
         .open()?;
-    for (field, val) in &config.matches {
-        journal.match_add(field, val.to_string())?;
-        journal.match_or()?;
+
+    let ParserFunctionType::ParserFn(parserfn) = config.parser else {
+        return Err(anyhow!("ParserFn required here"));
+    };
+
+    if let Some(values) = &config.matches {
+        for (field, val) in values {
+            journal.match_add(field, val.to_string())?;
+            journal.match_or()?;
+        }
     }
 
     let keyword = filter.unwrap_or_default();
@@ -2150,7 +2254,7 @@ pub fn read_journal_logs(
 
     loop {
         while let Some(data) = journal.next_entry()? {
-            if let Some(ev) = (config.parser)(data, ev_type.clone()) {
+            if let Some(ev) = parserfn(data, ev_type.clone()) {
                 if !ev.raw_msg.contains_bytes(&keyword) {
                     continue;
                 }

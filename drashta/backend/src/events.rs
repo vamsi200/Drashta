@@ -307,6 +307,7 @@ pub async fn drain_previous_logs(
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
+
 pub async fn receive_data(
     State(tx): State<tokio::sync::broadcast::Sender<EventData>>,
     filter_event: Query<FilterEvent>,
@@ -329,7 +330,8 @@ pub async fn receive_data(
 
         for val in journal_units {
             info!("Trying to get Live Events from `{val}`");
-            if let Err(e) = read_journal_logs(
+            //TODO: update below
+            if let Err(e) = read_journal_logs_manual(
                 &val,
                 filter_keyword.clone(),
                 ref_event_type.clone(),
