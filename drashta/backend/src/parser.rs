@@ -1760,8 +1760,6 @@ pub fn process_previous_logs(
     Ok(last_cursor)
 }
 
-//TODO: Include the live part here as well
-//Add the PkgManager impl
 pub fn process_service_logs(
     opts: ParserFuncArgs,
     cursor: Option<String>,

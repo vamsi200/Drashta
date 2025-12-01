@@ -37,15 +37,6 @@ use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 use crate::parser::*;
 
-pub struct Journalunits {
-    journal_units: Vec<String>,
-}
-impl Journalunits {
-    pub fn new() -> Vec<String> {
-        vec![]
-    }
-}
-
 #[derive(Deserialize)]
 pub struct ChunkSize {
     size: usize,
@@ -67,12 +58,12 @@ pub async fn drain_older_logs(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<EventData>(102400);
-    let mut journal_units = Journalunits::new();
 
-    match filter_event.0.event_name {
-        Some(event) => journal_units.push(event),
-        None => journal_units.clear(),
-    }
+    let journal_units = match filter_event.0.event_name {
+        Some(event) => event,
+        None => String::new(),
+    };
+
     let limit = filter_event.0.limit.unwrap();
     let filter_keyword = filter_event.0.query;
 
@@ -87,21 +78,19 @@ pub async fn drain_older_logs(
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
-        for ev in journal_units {
-            info!("Draining {ev} from {cursor_type:?} upto {limit} entries (next)",);
+        info!("Draining {journal_units} from {cursor_type:?} upto {limit} entries (next)",);
 
-            let opts = ParserFuncArgs::new(
-                ev.as_str(),
-                tx.clone(),
-                limit,
-                ProcessLogType::ProcessOlderLogs,
-                filter_keyword.clone(),
-                ref_event_type.clone(),
-                Some(cursor_type.clone()),
-            );
-            if let Ok(cursor_type) = handle_service_event(opts) {
-                new_cursor_type = cursor_type
-            }
+        let opts = ParserFuncArgs::new(
+            &journal_units,
+            tx.clone(),
+            limit,
+            ProcessLogType::ProcessOlderLogs,
+            filter_keyword.clone(),
+            ref_event_type.clone(),
+            Some(cursor_type.clone()),
+        );
+        if let Ok(cursor_type) = handle_service_event(opts) {
+            new_cursor_type = cursor_type
         }
 
         new_cursor_type
@@ -150,12 +139,11 @@ pub async fn drain_upto_n_entries(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<EventData>(102400);
-    let mut journal_units = Journalunits::new();
 
-    match &filter_event.0.event_name {
-        Some(event) => journal_units.push(event.clone()),
-        None => journal_units.clear(),
-    }
+    let journal_units = match filter_event.0.event_name {
+        Some(event) => event,
+        None => String::new(),
+    };
 
     let limit = filter_event.0.limit.unwrap();
     let journal_units_clone = journal_units.clone();
@@ -170,22 +158,20 @@ pub async fn drain_upto_n_entries(
 
         let mut last_cursor: Option<CursorType> = None;
 
-        for ev in journal_units_clone {
-            info!("Invoked initial drain for service: {ev}");
-            let opts = ParserFuncArgs::new(
-                ev.as_str(),
-                tx.clone(),
-                limit,
-                ProcessLogType::ProcessInitialLogs,
-                filter_keyword.clone(),
-                ref_event_type.clone(),
-                None,
-            );
+        info!("Invoked initial drain for service: {journal_units}");
+        let opts = ParserFuncArgs::new(
+            &journal_units_clone,
+            tx.clone(),
+            limit,
+            ProcessLogType::ProcessInitialLogs,
+            filter_keyword.clone(),
+            ref_event_type.clone(),
+            None,
+        );
 
-            if let Ok(Some(cursor_type)) = handle_service_event(opts) {
-                last_cursor = Some(cursor_type);
-                info!("Cursor - {last_cursor:?}");
-            }
+        if let Ok(Some(cursor_type)) = handle_service_event(opts) {
+            last_cursor = Some(cursor_type);
+            info!("Cursor - {last_cursor:?}");
         }
 
         last_cursor
@@ -232,12 +218,11 @@ pub async fn drain_previous_logs(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<EventData>(102400);
-    let mut journal_units = Journalunits::new();
+    let journal_units = match filter_event.0.event_name {
+        Some(event) => event,
+        None => String::new(),
+    };
 
-    match filter_event.0.event_name {
-        Some(event) => journal_units.push(event),
-        None => journal_units.clear(),
-    }
     let limit = filter_event.0.limit.unwrap();
 
     let cursor_type = filter_event.0.cursor.unwrap();
@@ -252,24 +237,22 @@ pub async fn drain_previous_logs(
             .as_ref()
             .map(|s| s.iter().map(|s| s.as_str()).collect());
 
-        for ev in journal_units {
-            info!("Draining {ev} from {cursor_type:?} upto {limit:?} entries (previous)",);
+        info!("Draining {journal_units} from {cursor_type:?} upto {limit:?} entries (previous)",);
 
-            let opts = ParserFuncArgs::new(
-                ev.as_str(),
-                tx.clone(),
-                limit,
-                ProcessLogType::ProcessPreviousLogs,
-                filter_keyword.clone(),
-                ref_event_type.clone(),
-                Some(cursor_type.clone()),
-            );
+        let opts = ParserFuncArgs::new(
+            &journal_units,
+            tx.clone(),
+            limit,
+            ProcessLogType::ProcessPreviousLogs,
+            filter_keyword.clone(),
+            ref_event_type.clone(),
+            Some(cursor_type.clone()),
+        );
 
-            let result = handle_service_event(opts);
+        let result = handle_service_event(opts);
 
-            if let Ok(cursor_type) = result {
-                new_cursor_type = cursor_type;
-            }
+        if let Ok(cursor_type) = result {
+            new_cursor_type = cursor_type;
         }
 
         new_cursor_type
@@ -313,12 +296,11 @@ pub async fn receive_data(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let rx = tx.clone().subscribe();
-    let mut journal_units = Journalunits::new();
+    let journal_units = match filter_event.0.event_name {
+        Some(event) => event,
+        None => String::new(),
+    };
 
-    match filter_event.0.event_name {
-        Some(event) => journal_units.push(event),
-        None => journal_units.clear(),
-    }
     let filter_keyword = filter_event.0.query;
 
     std::thread::spawn(move || {
@@ -328,11 +310,21 @@ pub async fn receive_data(
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
-        for val in journal_units {
-            info!("Trying to get Live Events from `{val}`");
-            //TODO: update below
+        info!("Trying to get Live Events from `{journal_units}`");
+
+        let is_manual_event = MANUAL_PARSE_EVENTS.iter().any(|&x| x == journal_units);
+        if is_manual_event {
             if let Err(e) = read_journal_logs_manual(
-                &val,
+                &journal_units,
+                filter_keyword.clone(),
+                ref_event_type.clone(),
+                tx.clone(),
+            ) {
+                eprintln!("Error: {e}");
+            }
+        } else {
+            if let Err(e) = read_journal_logs(
+                &journal_units,
                 filter_keyword.clone(),
                 ref_event_type.clone(),
                 tx.clone(),
