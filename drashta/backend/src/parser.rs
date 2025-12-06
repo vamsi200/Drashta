@@ -1,48 +1,30 @@
-#![allow(unused_variables)]
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    os::fd::{AsRawFd, BorrowedFd},
     path::PathBuf,
     rc::Rc,
     result::Result::Ok,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::Mutex,
     thread::sleep,
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 
 use ahash::AHashMap;
 use anyhow::Result;
 use anyhow::anyhow;
-use axum::extract::State;
 use chrono::{DateTime, Local, TimeZone};
-use futures::future::Either;
 use inotify::{Inotify, WatchMask};
 use log::{error, info, warn};
 use memchr::memmem;
 use once_cell::sync::Lazy;
 
 use rayon::prelude::*;
-use regex::Regex;
-use serde::{
-    Deserialize, Serialize,
-    de::{self, Deserializer},
-};
-use serde_json::json;
-use systemd::{journal::JournalRef, *};
-use tokio::{
-    io::unix::AsyncFd,
-    sync::{broadcast, mpsc},
-};
+use serde::{Deserialize, Serialize, de::Deserializer};
+use systemd::*;
 
-use crate::events::{self, receive_data};
 use crate::regex::*;
 pub type Entry = BTreeMap<String, String>;
 
@@ -326,7 +308,6 @@ macro_rules! handle_services {
     ) => {{
         let opts = $opts.clone();
         let service_name = opts.service_name;
-        let cursor: Option<String> = $cursor;
         let result: Result<String, anyhow::Error> = match service_name {
             $(
                 $service => process_service_logs(
@@ -346,7 +327,6 @@ pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
 }
 
 pub fn parse_sshd_logs(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
-    let msg = entry_map.get("MESSAGE")?;
     let timestamp = entry_map
         .get("SYSLOG_TIMESTAMP")
         .cloned()
@@ -449,7 +429,7 @@ pub fn parse_sudo_login_attempts(
 
         for (name, regex) in filtered_regexes.iter() {
             if let Some(msg) = regex.captures(trim_msg) {
-                let (data, event_type): (Option<&[(&str, usize)]>, EventType) = match *name {
+                let (data, _): (Option<&[(&str, usize)]>, EventType) = match *name {
                     "COMMAND_RUN" => (
                         Some(&[
                             ("invoking_user", 1),
@@ -668,7 +648,6 @@ pub fn parse_login_attempts(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
 }
 
 pub fn parse_kernel_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
-    let msg = entry_map.get("MESSAGE")?;
     let journal_timestamp = entry_map
         .get("_SOURCE_BOOTTIME_TIMESTAMP")
         .cloned()
@@ -1175,8 +1154,6 @@ fn format_syslog_timestamp(ts_str: &str) -> String {
     }
 }
 pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
-    let msg = entry_map.get("MESSAGE")?;
-
     let filtered_regexes: Vec<_> = if let Some(ev_types) = ev_type {
         let names: Vec<&str> = ev_types
             .iter()
@@ -1408,7 +1385,6 @@ pub fn parse_network_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Opt
     None
 }
 pub fn parse_firewalld_events(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
-    let msg = entry_map.get("MESSAGE")?;
     let timestamp = entry_map
         .get("SYSLOG_TIMESTAMP")
         .cloned()
@@ -1765,16 +1741,11 @@ pub fn process_service_logs(
     cursor: Option<String>,
 ) -> Result<String, anyhow::Error> {
     let configs = get_service_configs();
-    let event_type = opts.ev_type.clone();
     let service_name = opts.service_name;
     let processlogtype = opts.processlogtype.clone();
     let Some(config) = configs.get(service_name) else {
         ::anyhow::bail!("Unknown Service: {}", service_name);
     };
-
-    let s: Journal = journal::OpenOptions::default()
-        .all_namespaces(true)
-        .open()?;
 
     let new_cursor = match (cursor, processlogtype) {
         (Some(cursor), ProcessLogType::ProcessOlderLogs) => {
@@ -1794,7 +1765,6 @@ pub fn process_manual_events_upto_n(opts: ParserFuncArgs) -> Result<Option<Curso
     let service_name = opts.service_name;
     let filter = opts.filter.clone();
     let ev_type = opts.ev_type.clone();
-    let cursor = opts.cursor.clone();
     let limit = opts.limit;
     let tx = opts.tx.clone();
 
@@ -1811,11 +1781,9 @@ pub fn process_manual_events_upto_n(opts: ParserFuncArgs) -> Result<Option<Curso
         let mut reader = BufReader::with_capacity(128 * 1024, file);
         let mut count = 0;
         let mut buf = String::new();
-        let mut line_count = 0;
 
         while reader.read_line(&mut buf).unwrap() > 0 && count < limit {
             let offset = reader.stream_position()?;
-            line_count += 1;
             if let Some(ev) = parse_pkg_events(buf.trim_end().to_string(), ev_type.clone()) {
                 if !ev.raw_msg.contains_bytes(keyword.as_str()) {
                     continue;
@@ -1930,10 +1898,11 @@ pub fn process_manual_events_previous(
     let tx = opts.tx.clone();
     let mut new_cursor: Option<Cursor> = None;
     let mut keyword = String::new();
+
     if let Some(filter) = filter {
         keyword = filter;
     }
-    let chunk_size = 8192;
+
     if service_name == "pkgmanager.events" {
         let patterns = [cursor.timestamp.as_bytes(), cursor.data.as_bytes()];
         let offset = cursor.offset;
@@ -2066,14 +2035,9 @@ where
 pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> {
     let mut cursor_type: Option<CursorType> = None;
     let service_name = opts.service_name;
-    let filter = opts.filter.clone();
-    let ev_type = opts.ev_type.clone();
     let cursor = opts.cursor.clone();
     let processlogtype = opts.processlogtype.clone();
-    let limit = opts.limit;
-    let tx = opts.tx.clone();
     let is_manual_service = MANUAL_PARSE_EVENTS.contains(&service_name);
-    let configs = get_service_configs();
 
     if is_manual_service {
         match processlogtype {
@@ -2148,7 +2112,7 @@ pub fn read_journal_logs_manual(
     tx: tokio::sync::broadcast::Sender<EventData>,
 ) -> anyhow::Result<()> {
     let configs = get_service_configs();
-    // let mut failed_ev_buf = VecDeque::with_capacity(MAX_FAILED_EVENTS);
+    let mut failed_ev_buf = VecDeque::with_capacity(MAX_FAILED_EVENTS);
 
     let Some(config) = configs.get(service_name) else {
         anyhow::bail!("Unknown Service: {}", service_name);
@@ -2159,10 +2123,6 @@ pub fn read_journal_logs_manual(
     };
 
     let keyword = filter.unwrap_or_default();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_micros() as u64;
 
     let mut file = File::open("/var/log/pacman.log")?;
     let mut inotify = Inotify::init()?;
@@ -2196,13 +2156,33 @@ pub fn read_journal_logs_manual(
                     let log_line = String::from_utf8_lossy(&buf);
 
                     for line in log_line.lines() {
-                        if let Some(ev) = parse_pkg_events(line.to_string(), ev_type.clone()) {
-                            if ev.raw_msg.contains_bytes(keyword.as_str()) {
-                                if tx.send(ev.clone()).is_err() {
-                                    error!("No active receiver!!");
+                        if let Some(ev) = parserfn(line.to_string(), ev_type.clone()) {
+                            if !ev.raw_msg.contains_bytes(&keyword) {
+                                continue;
+                            }
+                            if tx.send(ev.clone()).is_err() {
+                                info!("No active receiver, buffering event");
+                                if failed_ev_buf.len() >= MAX_FAILED_EVENTS {
+                                    warn!(
+                                        "Buffer full with - {} events, dropping oldest to prevent memory increase",
+                                        failed_ev_buf.len()
+                                    );
+                                    failed_ev_buf.pop_front();
                                 }
+                                failed_ev_buf.push_back(ev);
                             }
                         }
+                    }
+                    if tx.receiver_count() > 0 && !failed_ev_buf.is_empty() {
+                        info!("Receiver reconnected, flushing buffering events...");
+                        let mut still_failed = VecDeque::new();
+                        while let Some(ev) = failed_ev_buf.pop_front() {
+                            if tx.send(ev.clone()).is_err() {
+                                still_failed.push_back(ev);
+                                break;
+                            }
+                        }
+                        failed_ev_buf = still_failed;
                     }
 
                     last_pos = new_len;

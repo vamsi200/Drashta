@@ -1,46 +1,20 @@
-#![allow(unused_variables)]
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 use anyhow::Result;
 use axum::{
-    Router,
     extract::State,
     response::sse::{Event, KeepAlive, Sse},
-    routing::get,
 };
 use axum_extra::extract::Query;
-use futures::{Stream, StreamExt, stream};
-use log::{Level, debug, error, info, log_enabled};
+use futures::StreamExt;
+use log::info;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::prelude::*;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::{json, to_string};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    convert::Infallible,
-    io::{BufWriter, Write},
-    mem::size_of_val,
-    process::exit,
-    sync::{Arc, Mutex},
-    thread::{sleep, spawn},
-    time::Duration,
-};
-use tokio::{
-    sync::{
-        broadcast::{self, Sender},
-        mpsc::{self, Receiver},
-    },
-    task::{spawn_blocking, yield_now},
-};
-use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+use std::{collections::VecDeque, convert::Infallible, time::Duration};
+use tokio::sync::mpsc::{self};
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::parser::*;
-
-#[derive(Deserialize)]
-pub struct ChunkSize {
-    size: usize,
-}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct FilterEvent {
@@ -50,8 +24,6 @@ pub struct FilterEvent {
     limit: Option<i32>,
     query: Option<String>,
     event_type: Option<Vec<String>>,
-    timestamp_from: Option<String>,
-    timestamp_to: Option<String>,
 }
 
 pub async fn drain_older_logs(
@@ -59,10 +31,7 @@ pub async fn drain_older_logs(
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<EventData>(102400);
 
-    let journal_units = match filter_event.0.event_name {
-        Some(event) => event,
-        None => String::new(),
-    };
+    let journal_units = filter_event.0.event_name.unwrap_or_default();
 
     let limit = filter_event.0.limit.unwrap();
     let filter_keyword = filter_event.0.query;
@@ -139,15 +108,10 @@ pub async fn drain_upto_n_entries(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<EventData>(102400);
-
-    let journal_units = match filter_event.0.event_name {
-        Some(event) => event,
-        None => String::new(),
-    };
+    let journal_units = filter_event.0.event_name.unwrap_or_default();
 
     let limit = filter_event.0.limit.unwrap();
     let journal_units_clone = journal_units.clone();
-    let tx_clone = tx.clone();
     let filter_keyword = filter_event.0.query;
     let handle = std::thread::spawn(move || {
         let ref_event_type: Option<Vec<&str>> = filter_event
@@ -218,10 +182,7 @@ pub async fn drain_previous_logs(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<EventData>(102400);
-    let journal_units = match filter_event.0.event_name {
-        Some(event) => event,
-        None => String::new(),
-    };
+    let journal_units = filter_event.0.event_name.unwrap_or_default();
 
     let limit = filter_event.0.limit.unwrap();
 
@@ -296,10 +257,7 @@ pub async fn receive_data(
     filter_event: Query<FilterEvent>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let rx = tx.clone().subscribe();
-    let journal_units = match filter_event.0.event_name {
-        Some(event) => event,
-        None => String::new(),
-    };
+    let journal_units = filter_event.0.event_name.unwrap_or_default();
 
     let filter_keyword = filter_event.0.query;
 
@@ -322,15 +280,13 @@ pub async fn receive_data(
             ) {
                 eprintln!("Error: {e}");
             }
-        } else {
-            if let Err(e) = read_journal_logs(
-                &journal_units,
-                filter_keyword.clone(),
-                ref_event_type.clone(),
-                tx.clone(),
-            ) {
-                eprintln!("Error: {e}");
-            }
+        } else if let Err(e) = read_journal_logs(
+            &journal_units,
+            filter_keyword.clone(),
+            ref_event_type.clone(),
+            tx.clone(),
+        ) {
+            eprintln!("Error: {e}");
         }
     });
 

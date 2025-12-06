@@ -1,9 +1,6 @@
-#![allow(unused_imports)]
-
 use crate::events::{drain_older_logs, drain_previous_logs, drain_upto_n_entries, receive_data};
-use crate::parser::{Entry, EventData};
-use axum::{Router, extract::Query, routing::get};
-use http::header;
+use crate::parser::EventData;
+use axum::{Router, routing::get};
 use tower_http::cors::{Any, CorsLayer};
 
 pub async fn render_app(tx: tokio::sync::broadcast::Sender<EventData>) {
