@@ -1,24 +1,42 @@
-#![allow(unused_variables)]
-#![allow(dead_code)]
-#![allow(unused_imports)]
+use std::process::exit;
 
-use crate::parser::read_journal_logs;
-use ahash::AHashMap;
-use anyhow::{Ok, Result};
-use drashta::events::receive_data;
-use drashta::parser::{
-    self, Cursor, Entry, EventData, EventType, RawMsgType, process_manual_events_previous,
-    process_manual_events_upto_n,
-};
+use anyhow::Result;
+use drashta::parser::EventData;
 use drashta::render::render_app;
-use log::info;
-use std::borrow::Cow;
-use std::vec;
+
+fn handle_args() -> u16 {
+    let mut args = std::env::args().skip(1);
+    let mut port = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--port" => {
+                port = args.next().and_then(|x| x.parse::<u16>().ok());
+            }
+            "--help" | "-h" => {
+                print_help();
+                exit(0);
+            }
+            _ => {}
+        }
+    }
+    if port.is_some() { port.unwrap() } else { 3200 }
+}
+fn print_help() {
+    println!(
+        r#"Usage: drashta [OPTIONS]
+
+Options:
+  -h, --help        Print this help message
+  --port <PORT>     Set the server port (default: 3200)
+"#
+    );
+}
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-    env_logger::init();
     let (tx, _) = tokio::sync::broadcast::channel::<EventData>(1024);
-    let _ = render_app(tx).await;
+    let port = handle_args();
+    render_app(tx, port).await;
+
     Ok(())
 }

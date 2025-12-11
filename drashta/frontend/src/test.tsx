@@ -2,7 +2,9 @@ import { useEffect, useState, useMemo, useRef, useCallback, memo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import LogCountChart from "./chart";
 import DateRangePicker from "./DateRangePicker";
-import PageSizeDropdown from "./PageSizeDropdown";
+
+const cfg = await fetch("/config.json").then(r => r.json());
+const port = cfg.port;
 
 const EVENT_TYPE_LISTS = {
   Auth: [
@@ -153,9 +155,6 @@ const getEventTypesForService = (service: string): string[] => {
     "NetworkManager": "Network",
   };
 
-  if (service === "All") {
-    return ["All", ...Object.values(EVENT_TYPE_LISTS).flat()];
-  }
 
   const eventCategory = serviceMap[service];
   if (eventCategory) {
@@ -841,6 +840,7 @@ const TableLogRow = memo(function TableLogRow({
 });
 
 export default function Dashboard() {
+
   const [theme, setTheme] = useState<ThemeType>(() => {
     return (localStorage.getItem('drashta_theme') || "emerald") as ThemeType;
   });
@@ -884,7 +884,6 @@ export default function Dashboard() {
   });
 
   const [isServiceDropdownOpen, setIsServiceDropdownOpen] = useState(false);
-  const [_allAvailableTypes, setAllAvailableTypes] = useState<string[]>(["All"]);
   const serviceEventTypes = useMemo(() => {
     return getEventTypesForService(selectedService);
   }, [selectedService]);
@@ -899,9 +898,8 @@ export default function Dashboard() {
   const [dateRangeDropdownOpen, setDateRangeDropdownOpen] = useState(false);
 
   const [cursor, setCursor] = useState<string | null>(null);
-  const [pageSizeDropdownOpen, setPageSizeDropdownOpen] = useState(false);
 
-  const [pageSize, setPageSize] = useState<number>(1000);
+  const [pageSize, _setPageSize] = useState<number>(1000);
 
   const [currentPage, setCurrentPage] = useState<number>(() => {
     const saved = localStorage.getItem('drashta_currentPage');
@@ -1014,16 +1012,6 @@ export default function Dashboard() {
     return params.toString();
   }, [activeQuery]);
 
-  useEffect(() => {
-    if (allLogsForAnalytics.length > 0) {
-      const uniqueTypes = [
-        ...new Set(
-          allLogsForAnalytics.map((log) => parseEventType(log.event_type))
-        ),
-      ].sort();
-      setAllAvailableTypes(["All", ...uniqueTypes]);
-    }
-  }, [allLogsForAnalytics]);
 
   useEffect(() => {
     if (selectedSource !== "live") {
@@ -1038,7 +1026,7 @@ export default function Dashboard() {
     let reconnectTimer: number | null = null;
 
     const connect = () => {
-      const url = `http://localhost:3200/live?event_name=${encodeURIComponent(eventName)}`;
+      const url = `http://localhost:${port}/live?event_name=${encodeURIComponent(eventName)}`;
       const es = new EventSource(url);
 
       es.onopen = () => {
@@ -1123,7 +1111,7 @@ export default function Dashboard() {
         event_type: eventTypes && eventTypes.length > 0 ? eventTypes : undefined,
       });
 
-      const res = await fetch(`http://localhost:3200/drain?${queryParams}`);
+      const res = await fetch(`http://localhost:${port}/drain?${queryParams}`);
       if (!res.ok) throw new Error(`Failed to fetch drain: ${res.status}`);
       const text = await res.text();
 
@@ -1156,12 +1144,6 @@ export default function Dashboard() {
     }
   }, [eventName, pageSize, buildQueryParams, extractCursor]);
 
-  const handlePageSizeChange = useCallback((newSize: number) => {
-    setPageSize(newSize);
-    setCurrentPage(0);
-    setCursorStack([]);
-    fetchInitialDrain(appliedType.length > 0 ? appliedType : undefined);
-  }, [appliedType, fetchInitialDrain]);
 
   const handleSearchSubmit = useCallback(() => {
     const trimmedQuery = searchTerm.trim();
@@ -1195,7 +1177,7 @@ export default function Dashboard() {
         event_type: appliedType.length > 0 ? appliedType : undefined,
       });
 
-      const res = await fetch(`http://localhost:3200/previous?${queryParams}`);
+      const res = await fetch(`http://localhost:${port}/previous?${queryParams}`);
       if (!res.ok) throw new Error(`Failed to fetch previous: ${res.status}`);
       const text = await res.text();
 
@@ -1238,7 +1220,7 @@ export default function Dashboard() {
         event_type: appliedType.length > 0 ? appliedType : undefined,
       });
 
-      const res = await fetch(`http://localhost:3200/older?${queryParams}`);
+      const res = await fetch(`http://localhost:${port}/older?${queryParams}`);
       if (!res.ok) throw new Error(`Failed to fetch older: ${res.status}`);
       const text = await res.text();
 
@@ -1651,22 +1633,6 @@ export default function Dashboard() {
                 Page {currentPage + 1} • {filteredAndSortedLogs.length} entries • {allDrainLogs.length} total
               </span>
               <div className="flex items-center gap-2">
-                <div className="relative">
-                  <button
-                    onClick={() => setPageSizeDropdownOpen(!pageSizeDropdownOpen)}
-                    className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
-                  >
-                    {pageSize}
-                  </button>
-                  <PageSizeDropdown
-                    selectedSize={pageSize}
-                    onSizeChange={handlePageSizeChange}
-                    isOpen={pageSizeDropdownOpen}
-                    onToggle={() => setPageSizeDropdownOpen(false)}
-                    theme={theme}
-                  />
-                </div>
-
                 <button
                   onClick={handlePrevPage}
                   disabled={currentPage === 0 || isFetching}

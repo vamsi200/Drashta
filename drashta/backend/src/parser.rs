@@ -322,10 +322,6 @@ macro_rules! handle_services {
     }};
 }
 
-pub fn rg_capture(msg: &regex::Captures, i: usize) -> Option<String> {
-    msg.get(i).map(|m| m.as_str().to_string())
-}
-
 pub fn parse_sshd_logs(entry_map: Entry, ev_type: Option<Vec<&str>>) -> Option<EventData> {
     let timestamp = entry_map
         .get("SYSLOG_TIMESTAMP")
