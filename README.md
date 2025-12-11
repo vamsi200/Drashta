@@ -34,7 +34,7 @@ It converts these raw logs into structured events and streams them to a web UI u
 
 ```bash
 git clone https://github.com/vamsi200/Drashta
-cd drashta/backend
+cd Drashta/backend
 chmod +x build.sh
 ./build.sh
 
