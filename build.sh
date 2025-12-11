@@ -21,14 +21,19 @@ if [[ ! -d "$BACKEND_DIR" || ! -d "$FRONTEND_DIR" ]]; then
   exit 1
 fi
 
-echo "[1/2] Building backend (release mode)"
+echo "[1/3] Building backend (release mode)"
 cd "$BACKEND_DIR"
 cargo build --release
 echo "Backend build completed."
 echo ""
 
-echo "[2/2] Building frontend (npm run build)"
+echo "[2/3] Installing frontend dependencies (npm install)"
 cd "$FRONTEND_DIR"
+npm install
+echo "npm install completed."
+echo ""
+
+echo "[3/3] Building frontend (npm run build)"
 npm run build
 echo "Frontend build completed."
 echo ""
