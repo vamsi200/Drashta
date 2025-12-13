@@ -429,17 +429,18 @@ export const THEME_CONFIG: Record<ThemeType, {
   white: {
     bg: "bg-white",
     text: "text-gray-900",
-    border: "border-gray-300",
-    accent: "text-gray-600",
+    border: "border-gray-500",
+    accent: "text-gray-700",
     hover: "hover:bg-gray-100",
     activeBtn: "bg-gray-900 text-white",
     inactiveBtn: "bg-white text-gray-900",
     logRowBg: "bg-white",
     logRowHover: "hover:bg-gray-50",
-    logRowBorder: "border-gray-200",
-    expandedBg: "bg-gray-50 border-l-gray-400",
+    logRowBorder: "border-gray-400",
+    expandedBg: "bg-gray-50 border-l-gray-500",
     modalBg: "bg-white",
   },
+
   black: {
     bg: "bg-black",
     text: "text-white",
@@ -631,6 +632,8 @@ const EventTypeDropdown = memo(function EventTypeDropdown({
     </div>
   );
 });
+
+
 
 function JsonPart({
   isOpen,
@@ -883,6 +886,8 @@ export default function Dashboard() {
     }
   });
 
+  const PAGE_SIZE_OPTIONS = [10, 50, 100, 500, 1000];
+
   const [isServiceDropdownOpen, setIsServiceDropdownOpen] = useState(false);
   const serviceEventTypes = useMemo(() => {
     return getEventTypesForService(selectedService);
@@ -899,7 +904,8 @@ export default function Dashboard() {
 
   const [cursor, setCursor] = useState<string | null>(null);
 
-  const [pageSize, _setPageSize] = useState<number>(1000);
+  const [pageSize, setPageSize] = useState<number>(100);
+  const [pageSizeDropdownOpen, setPageSizeDropdownOpen] = useState(false);
 
   const [currentPage, setCurrentPage] = useState<number>(() => {
     const saved = localStorage.getItem('drashta_currentPage');
@@ -938,6 +944,7 @@ export default function Dashboard() {
   const eventName = `${selectedService.toLowerCase()}.events`;
   const currentLogs = selectedSource === "drain" ? drainLogs : liveLogs;
   const allLogsForAnalytics = selectedSource === "drain" ? allDrainLogs : liveLogs;
+
 
   useEffect(() => {
     localStorage.setItem('drashta_searchTerm', searchTerm);
@@ -1102,13 +1109,13 @@ export default function Dashboard() {
     }
   }, []);
 
-  const fetchInitialDrain = useCallback(async (eventTypes?: string[]) => {
+  const fetchInitialDrain = useCallback(async () => {
     setIsFetching(true);
     try {
       const queryParams = buildQueryParams({
         event_name: eventName,
         limit: pageSize.toString(),
-        event_type: eventTypes && eventTypes.length > 0 ? eventTypes : undefined,
+        event_type: appliedType.length > 0 ? appliedType : undefined,
       });
 
       const res = await fetch(`http://localhost:${port}/drain?${queryParams}`);
@@ -1142,8 +1149,18 @@ export default function Dashboard() {
     } finally {
       setIsFetching(false);
     }
-  }, [eventName, pageSize, buildQueryParams, extractCursor]);
+  }, [eventName, pageSize, appliedType, buildQueryParams, extractCursor]);
 
+  const handlePageSizeChange = useCallback(
+    (newSize: number) => {
+      setPageSize(newSize);
+      setCurrentPage(0);
+      setCursor(null);
+      setCursorStack([]);
+
+    },
+    [setPageSize, setCurrentPage, setCursor, setCursorStack, selectedSource, fetchInitialDrain, appliedType],
+  );
 
   const handleSearchSubmit = useCallback(() => {
     const trimmedQuery = searchTerm.trim();
@@ -1163,7 +1180,7 @@ export default function Dashboard() {
     if (cursorStack.length === 0) return;
 
     if (currentPage === 1) {
-      fetchInitialDrain(appliedType.length > 0 ? appliedType : undefined);
+      fetchInitialDrain();
       return;
     }
 
@@ -1297,7 +1314,7 @@ export default function Dashboard() {
     setAppliedType(selectedType);
 
     if (currentPage === 0) {
-      fetchInitialDrain(selectedType.length > 0 ? selectedType : undefined);
+      fetchInitialDrain();
     }
   }, [selectedType, currentPage, fetchInitialDrain]);
 
@@ -1550,17 +1567,25 @@ export default function Dashboard() {
             <div className={`flex border ${config.border} rounded overflow-hidden`}>
               <button
                 onClick={() => handleSourceChange("drain")}
-                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono ${selectedSource === "drain" ? "font-bold" : "font-normal"}`}
+                className={`px-2 py-1 text-xs font-mono transition-colors rounded ${selectedSource === "drain"
+                  ? `${config.activeBtn} font-bold`
+                  : `${config.bg} ${config.text} opacity-70`
+                  }`}
               >
                 DRAIN
               </button>
+
               <button
                 onClick={() => handleSourceChange("live")}
-                className={`px-2 py-1 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono ${selectedSource === "live" ? "font-bold" : "font-normal"}`}
+                className={`px-2 py-1 text-xs font-mono transition-colors rounded ${selectedSource === "live"
+                  ? `${config.activeBtn} font-bold`
+                  : `${config.bg} ${config.text} opacity-70`
+                  }`}
               >
                 LIVE
               </button>
             </div>
+
 
             <button
               onClick={handleRefresh}
@@ -1628,11 +1653,41 @@ export default function Dashboard() {
       <div className={`flex-1 flex flex-col overflow-hidden ${config.bg} relative`}>
         <div className={`flex-1 flex flex-col overflow-hidden border ${config.border} rounded-lg m-2 ${config.logRowBg}`}>
           {selectedSource === "drain" && (
-            <div className={`px-3 py-4 flex justify-between items-center -mt-2`}>
+            <div className="px-3 py-4 flex justify-between items-center -mt-2">
               <span className={`text-xs font-mono ${config.accent}`}>
-                Page {currentPage + 1} • {filteredAndSortedLogs.length} entries • {allDrainLogs.length} total
+                Page {currentPage + 1} · {filteredAndSortedLogs.length} entries · {allDrainLogs.length} total
               </span>
+
               <div className="flex items-center gap-2">
+                <div className="relative">
+                  <button
+                    onClick={() => setPageSizeDropdownOpen(!pageSizeDropdownOpen)}
+                    className={`px-2 py-0.5 ${config.bg} border ${config.border} rounded ${config.text} text-xs hover:opacity-80 transition-colors font-mono`}
+                  >
+                    LIMIT {pageSize}
+                  </button>
+
+                  {pageSizeDropdownOpen && (
+                    <div
+                      className={`absolute top-full right-0 mt-1 ${config.bg} border ${config.border} rounded shadow-2xl z-20 min-w-[80px]`}
+                    >
+                      {PAGE_SIZE_OPTIONS.map((size) => (
+                        <button
+                          key={size}
+                          onClick={() => {
+                            handlePageSizeChange(size);
+                            setPageSizeDropdownOpen(false);
+                          }}
+                          className={`w-full text-left px-2 py-1 text-xs hover:opacity-80 border-b ${config.border} last:border-b-0 font-mono ${size === pageSize ? config.accent : config.text
+                            }`}
+                        >
+                          {size} / page
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <button
                   onClick={handlePrevPage}
                   disabled={currentPage === 0 || isFetching}
@@ -1650,7 +1705,6 @@ export default function Dashboard() {
               </div>
             </div>
           )}
-
           <div ref={parentRef} className={`flex-1 overflow-y-auto ${config.bg}`}>
             {filteredAndSortedLogs.length === 0 ? (
               <div className="flex items-center justify-center h-full">

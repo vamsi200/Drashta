@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { THEME_CONFIG, type ThemeType } from "./test";
+import { THEME_CONFIG, type ThemeType } from "./Dashboard.tsx";
 
 interface DateRangePickerProps {
   isOpen: boolean;

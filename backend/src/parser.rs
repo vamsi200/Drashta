@@ -7,7 +7,10 @@ use std::{
     rc::Rc,
     result::Result::Ok,
     str::FromStr,
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicI32, Ordering},
+    },
     thread::sleep,
     time::Duration,
 };
@@ -1576,33 +1579,54 @@ pub fn process_entries_in_parallel(
     data: VecDeque<Entry>,
     opts: &ParserFuncArgs,
     config: &ServiceConfig,
-) -> Result<(), anyhow::Error> {
+    limit: i32,
+) -> Result<i32, anyhow::Error> {
     let filter = &opts.filter;
     let tx = &opts.tx;
     let event_type = &opts.ev_type;
+
     let ParserFunctionType::ParserFn(parserfn) = config.parser else {
         return Err(anyhow!("ParserFn required here"));
     };
 
-    data.par_iter().for_each(|val| {
-        if let Some(ev) = parserfn(val.clone(), event_type.clone()) {
-            if let Some(filter_val) = filter {
-                if !ev.raw_msg.contains_bytes(filter_val) {
-                    return;
-                }
-            }
+    let count = AtomicI32::new(0);
 
+    data.par_iter().for_each(|val| {
+        let cur = count.load(Ordering::Relaxed);
+        if cur >= limit {
+            return;
+        }
+
+        let ev = match parserfn(val.clone(), event_type.clone()) {
+            Some(ev) => ev,
+            None => return,
+        };
+
+        if let Some(filter_val) = filter {
+            if !ev.raw_msg.contains_bytes(filter_val) {
+                return;
+            }
+        }
+
+        let ok = count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                if c < limit { Some(c + 1) } else { None }
+            })
+            .is_ok();
+
+        if ok {
             let _ = tx.try_send(ev);
         }
     });
 
-    Ok(())
+    Ok(count.load(Ordering::Relaxed))
 }
 
 pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> Result<String> {
-    let limit = opts.limit;
     let mut journal = opts.journal.lock().unwrap();
     let mut batch = VecDeque::with_capacity(100);
+
+    let mut remaining = opts.limit;
 
     if let Some(values) = &config.matches {
         for (field, value) in values {
@@ -1613,23 +1637,25 @@ pub fn process_upto_n_entries(opts: ParserFuncArgs, config: &ServiceConfig) -> R
 
     journal.seek_head()?;
 
-    let mut count = 0;
-    while count < limit {
-        if let Some(data) = journal.next_entry()? {
-            count += 1;
-            batch.push_back(data);
-
-            if batch.len() >= 100 {
-                let current_batch = std::mem::replace(&mut batch, VecDeque::with_capacity(100));
-                process_entries_in_parallel(current_batch, &opts, config)?;
-            }
-        } else {
+    while remaining > 0 {
+        let Some(data) = journal.next_entry()? else {
             break;
+        };
+
+        batch.push_back(data);
+
+        if batch.len() >= 100 {
+            let current = std::mem::take(&mut batch);
+            let processed = process_entries_in_parallel(current, &opts, config, remaining)?;
+            remaining -= processed;
+            if remaining <= 0 {
+                break;
+            }
         }
     }
 
-    if !batch.is_empty() {
-        process_entries_in_parallel(batch, &opts, config)?;
+    if remaining > 0 && !batch.is_empty() {
+        process_entries_in_parallel(batch, &opts, config, remaining)?;
     }
 
     let cursor = journal.cursor()?;
@@ -1641,7 +1667,7 @@ pub fn process_older_logs(
     config: &ServiceConfig,
     cursor: String,
 ) -> Result<String> {
-    let limit = opts.limit;
+    let mut remaining = opts.limit;
     let mut journal = opts.journal.lock().unwrap();
     let mut batch = VecDeque::with_capacity(100);
 
@@ -1654,19 +1680,21 @@ pub fn process_older_logs(
     journal.seek_cursor(&cursor)?;
     journal.next_entry()?;
 
-    let mut count = 0;
     let mut last_cursor = cursor.clone();
-    while count < limit {
+    while remaining > 0 {
         match journal.next_entry()? {
             Some(data) => {
-                count += 1;
                 batch.push_back(data);
 
                 if batch.len() >= 100 {
-                    let current_batch = std::mem::replace(&mut batch, VecDeque::with_capacity(100));
-                    process_entries_in_parallel(current_batch, &opts, config)?;
-                }
+                    let current = std::mem::take(&mut batch);
+                    let processed = process_entries_in_parallel(current, &opts, config, remaining)?;
 
+                    remaining -= processed;
+                    if remaining <= 0 {
+                        break;
+                    }
+                }
                 last_cursor = journal.cursor()?;
             }
             None => {
@@ -1675,9 +1703,10 @@ pub fn process_older_logs(
             }
         }
     }
-    if !batch.is_empty() {
-        process_entries_in_parallel(batch, &opts, config)?;
+    if remaining > 0 && !batch.is_empty() {
+        process_entries_in_parallel(batch, &opts, config, remaining)?;
     }
+
     Ok(last_cursor)
 }
 
@@ -2026,8 +2055,6 @@ where
     }
 }
 
-// Should also think to capture command failures
-//TODO: Need to check the name's of the services beacuse there are different on different distros
 pub fn handle_service_event(opts: ParserFuncArgs) -> Result<Option<CursorType>> {
     let mut cursor_type: Option<CursorType> = None;
     let service_name = opts.service_name;

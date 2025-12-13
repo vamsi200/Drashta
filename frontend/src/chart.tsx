@@ -2,7 +2,7 @@ import { useMemo, useRef, useEffect, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
 } from "recharts";
-import { THEME_CONFIG, type ThemeType, type EventData } from "./test";
+import { THEME_CONFIG, type ThemeType, type EventData } from "./Dashboard.tsx";
 
 interface LogCountChartProps {
   logs: EventData[];
