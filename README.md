@@ -152,6 +152,38 @@ GET /previous?event_name=<name.events>&cursor=<cursor>&limit=<n>
   Fetches logs older than the given cursor.
 
 ```
+## UI Overview
+
+The UI is designed to provide clear, real-time visibility into security-relevant system activity.
+
+### Themes
+- Dark
+- Light
+- Hecker(emerald)
+
+### Viewing Modes
+- **Live Mode**  
+  Streams events in real time using Server-Sent Events (SSE).
+- **Drain Mode**  
+  Used for inspecting historical logs.
+
+### Filtering & Analysis
+- Filter by event source (SSHD, SUDO, Kernel, etc.)
+- Filter by event subtype (e.g. `Auth::Success`, `Auth::Failure`)
+- Filter by time and date ranges
+- Full-text search across logs
+- Interactive charts for visualizing activity patterns
+- Inspect to get the raw log entry
+
+
+## Screenshots
+
+![Dashboard Dark Theme](images/D1.png)
+![Dashboard Hecker Theme](images/D2.png)
+![Dashboard Light Theme](images/D3.png)
+![Event Type](images/D4.png)
+![Chart](images/D5.png)
+![Event Sub Type](images/D6.png)
 
 # LICENSE
 This project is open source and available under the MIT License.
